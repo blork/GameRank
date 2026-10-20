@@ -3,6 +3,6 @@ main = "index.js"
 compatibility_date = "2025-09-01"
 
 [vars]
-ALLOWED_ORIGINS = "https://blork.github.io,http://localhost:8765"
+ALLOWED_ORIGINS = "https://www.sam-oakley.co.uk,http://www.sam-oakley.co.uk,https://blork.github.io,http://localhost:8765"
 
 # Secrets (not in this file): npx wrangler secret put TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET

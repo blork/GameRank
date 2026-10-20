@@ -6,7 +6,7 @@ Prototype: rank every game you've played by picking the better of two. Static si
 ```
 python3 -m http.server 8765
 ```
-Open http://localhost:8765. The Worker only accepts requests from this origin and `https://blork.github.io`.
+Open http://localhost:8765. The Worker only accepts requests from the origins in `worker/wrangler.toml`.
 
 ## Test the ranking logic
 ```
@@ -26,7 +26,7 @@ npx wrangler secret put TWITCH_CLIENT_SECRET
 To allow another site, add its origin to `ALLOWED_ORIGINS` in `wrangler.toml` and redeploy.
 
 ## Deploy the site
-Push to GitHub, then Settings → Pages → Deploy from branch `main`, folder `/`.
+Pages deploys `main` automatically: https://www.sam-oakley.co.uk/GameRank/
 
 ## Files
 - `rank.js`: binary-insertion ranking, no DOM (port target for iOS)
