@@ -1,2 +1,5 @@
 logs/
 .DS_Store
+worker/.wrangler/
+worker/.dev.vars
+node_modules/

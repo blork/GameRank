@@ -65,3 +65,7 @@ ol.rows { list-style: none; }
   .rows li { flex-wrap: wrap; }
   .acts { width: 100%; }
 }
+
+.search { display: flex; gap: 8px; margin-top: 32px; }
+.search input { flex: 1; min-width: 0; font: inherit; padding: 6px 10px; border: 1px solid var(--line);
+                border-radius: 6px; background: var(--card); color: var(--fg); }
