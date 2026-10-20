@@ -125,7 +125,9 @@ async function rank() {
   R.ensureCurrent(s, pool());
   save();
   const p = R.pair(s);
-  const stats = `<p class="muted">${s.ranked.length} ranked · ${s.stats.comparisons} comparisons</p>`;
+  const { comparisons, rematches, agreed } = s.stats;
+  const stats = `<p class="muted">${s.ranked.length} ranked · ${comparisons} comparisons${rematches
+    ? ` · rematches agree ${Math.round(100 * agreed / rematches)}% (${rematches})` : ''}</p>`;
   const search = searchBox('Played something not shown? Search IGDB');
   if (!p) return `<h1>No games left</h1><p>Every game on your platforms is ranked, backlogged or ignored.</p>${stats}${search}`;
   const c = s.current;
@@ -139,8 +141,9 @@ async function rank() {
         <button data-act="ignored" data-id="${id}">Not interested</button></div>` : '<div class="skip muted">In your list</div>'}
     </div>`;
   };
-  const left = c.opponent == null && `Placing ${esc(game(c.candidate).name)}: about ${Math.ceil(Math.log2(c.hi - c.lo + 1))} more`;
-  return `<h1>Which is better?</h1>${left ? `<p class="muted">${left}</p>` : ''}
+  const left = c.rematch ? `Both are in your list. ${esc(game(c.rematch[0]).name)} is ranked higher; pick the other to move it up.`
+    : c.opponent == null && `Placing ${esc(game(c.candidate).name)}: about ${Math.ceil(Math.log2(c.hi - c.lo + 1))} more`;
+  return `<h1>${c.rematch ? 'Rematch: which is better now?' : 'Which is better?'}</h1>${left ? `<p class="muted">${left}</p>` : ''}
     <div class="pair">${card(p[0], '←')}${card(p[1], '→')}</div>
     <div class="controls">
       <button data-act="tie">Too close to call</button>
@@ -281,7 +284,8 @@ async function render() {
   if (n !== render.n) return;
   view.innerHTML = html;
   if (s.lastPlaced) {
-    toast(`Placed ${game(s.lastPlaced.id).name} at #${s.lastPlaced.rank}`);
+    const { id, rank, moved } = s.lastPlaced;
+    toast(`${moved ? 'Moved' : 'Placed'} ${game(id).name} ${moved ? 'up to' : 'at'} #${rank}`);
     s.lastPlaced = null;
     save();
   }
@@ -340,7 +344,7 @@ view.addEventListener('change', e => {
     e.target.files[0].text().then(async t => {
       const d = JSON.parse(t);
       if (!Array.isArray(d.ranked) || !Array.isArray(d.platforms)) throw new Error('not a GameRank export');
-      s = Object.assign(R.fresh(), d, { history: [] });
+      s = withDefaults(d);
       await ensureDetails();
       save();
       toast(`Imported ${s.ranked.length} ranked games`);
@@ -369,11 +373,17 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowRight') act('choose', p[1]);
   else if (e.key === 'u') act('undo');
   else if (e.key === 't') act('tie');
-  else if (e.key === 'b') act('backlog', s.current.candidate);
-  else if (e.key === 'i') act('ignored', s.current.candidate);
+  else if (e.key === 'b' && s.current.candidate != null) act('backlog', s.current.candidate);
+  else if (e.key === 'i' && s.current.candidate != null) act('ignored', s.current.candidate);
 });
 
 addEventListener('hashchange', render);
 
-s = Object.assign(R.fresh(), readJSON(KEY));
+// Saved or imported state may predate newer fields.
+function withDefaults(saved) {
+  const f = R.fresh();
+  return Object.assign(f, saved, { stats: { ...f.stats, ...saved?.stats }, seen: saved?.seen ?? {}, history: saved?.history ?? [] });
+}
+
+s = withDefaults(readJSON(KEY));
 render();
