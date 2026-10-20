@@ -2,8 +2,8 @@ import * as R from './rank.js';
 
 const API = 'https://gamerank.crimson-wave-94ca.workers.dev';
 const KEY = 'gamerank:v2';
-const CAT = 'gamerank:catalogue'; // disposable cache of game details and the candidate pool
-const FIELDS = 'fields name,first_release_date,cover.image_id,platforms,total_rating_count;';
+const CAT = 'gamerank:catalogue:v2'; // disposable cache of game details and the candidate pool
+const FIELDS = 'fields name,first_release_date,cover.image_id,platforms,total_rating_count,franchises.name,collections.name;';
 const TYPES = 'game_type = (0,4,8,9,10)'; // main, standalone expansion, remake, remaster, expanded
 const POOL_MIN = 50;
 const view = document.getElementById('view');
@@ -33,6 +33,7 @@ function addGames(list) {
       id: g.id, name: g.name,
       year: g.first_release_date ? new Date(g.first_release_date * 1000).getUTCFullYear() : null,
       cover: g.cover?.image_id ?? null, platforms: g.platforms ?? [], pop: g.total_rating_count ?? 0,
+      series: [...new Set([...g.franchises ?? [], ...g.collections ?? []].map(x => x.name))],
     };
   }
   return list.map(g => g.id);
@@ -120,10 +121,7 @@ async function rank() {
   save();
   const p = R.pair(s);
   const stats = `<p class="muted">${s.ranked.length} ranked · ${s.stats.comparisons} comparisons</p>`;
-  const search = `<form id="search" class="search">
-      <input type="search" name="q" placeholder="Played something not shown? Search IGDB" aria-label="Search games">
-      <button>Search</button>
-    </form><ul id="results" class="rows"></ul>`;
+  const search = searchBox('Played something not shown? Search IGDB');
   if (!p) return `<h1>No games left</h1><p>Every game on your platforms is ranked, backlogged or ignored.</p>${stats}${search}`;
   const c = s.current;
   const skippable = id => id === c.candidate || c.opponent != null;
@@ -136,13 +134,19 @@ async function rank() {
         <button data-act="ignored" data-id="${id}">Not interested</button></div>` : '<div class="skip muted">In your list</div>'}
     </div>`;
   };
-  return `<h1>Which is better?</h1>
+  const left = c.opponent == null && `Placing ${esc(game(c.candidate).name)}: about ${Math.ceil(Math.log2(c.hi - c.lo + 1))} more`;
+  return `<h1>Which is better?</h1>${left ? `<p class="muted">${left}</p>` : ''}
     <div class="pair">${card(p[0], '←')}${card(p[1], '→')}</div>
     <div class="controls">
       <button data-act="tie">Too close to call</button>
       <button data-act="undo" ${s.history.length ? '' : 'disabled'}>Undo</button>
     </div>${stats}${search}`;
 }
+
+const searchBox = placeholder => `<form id="search" class="search">
+    <input type="search" name="q" placeholder="${placeholder}" aria-label="Search games">
+    <button>Search</button>
+  </form><ul id="results" class="rows"></ul>`;
 
 async function searchGames(term) {
   const q = term.replace(/["\\]/g, '').trim();
@@ -162,35 +166,65 @@ async function searchGames(term) {
   }
 }
 
-function shareText() {
-  const n = document.getElementById('topn')?.value ?? '10';
-  const year = document.getElementById('year')?.value ?? '';
-  let list = s.ranked.map(game);
-  if (year) list = list.filter(g => String(g.year) === year);
-  if (n !== 'all') list = list.slice(0, Number(n));
-  const title = `My ${n === 'all' ? '' : `top ${list.length} `}games${year ? ` of ${year}` : ''}`;
-  return [title, ...list.map((g, i) => `${i + 1}. ${g.name}${g.year ? ` (${g.year})` : ''}`)].join('\n');
+const filters = { top: 'all', platform: '', year: '', series: '' }; // per session
+
+function filtered() {
+  const { top, platform, year, series } = filters;
+  let l = s.ranked.map((id, i) => ({ g: game(id), rank: i + 1 }));
+  if (platform) l = l.filter(x => x.g.platforms.includes(Number(platform)));
+  if (year) l = l.filter(x => year.endsWith('s') ? Math.floor(x.g.year / 10) * 10 === parseInt(year) : x.g.year === Number(year));
+  if (series) l = l.filter(x => x.g.series?.includes(series));
+  return top === 'all' ? l : l.slice(0, Number(top));
 }
+
+function shareText() {
+  const { top, platform, year, series } = filters;
+  const l = filtered();
+  const what = [series, platform && cat.platNames[platform]].filter(Boolean).join(' ');
+  const when = year ? ` of ${year.endsWith('s') ? 'the ' : ''}${year}` : '';
+  const title = `My ${top === 'all' ? '' : `top ${l.length} `}${what ? `${what} ` : ''}games${when}`;
+  return [title, ...l.map(({ g }, i) => `${i + 1}. ${g.name}${g.year ? ` (${g.year})` : ''}`)].join('\n');
+}
+
+// Values sorted by how many ranked games have them.
+function byCount(values) {
+  const n = {};
+  for (const v of values) n[v] = (n[v] ?? 0) + 1;
+  return Object.keys(n).sort((a, b) => n[b] - n[a] || a.localeCompare(b));
+}
+
+const select = (key, opts) => `<select data-filter="${key}" aria-label="${key}">${opts.map(([v, t]) =>
+  `<option value="${esc(v)}" ${filters[key] === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
 
 function list() {
-  if (!s.ranked.length) return `<h1>My list</h1><p>Nothing ranked yet. <a href="#rank">Start ranking</a>.</p>`;
-  const years = [...new Set(s.ranked.map(id => game(id).year).filter(Boolean))].sort((a, b) => b - a);
-  return `<h1>My list</h1>
-    <details class="share"><summary>Share</summary>
-      <label>Show <select id="topn"><option>10</option><option>25</option><option>100</option><option value="all">All</option></select></label>
-      <label>Year <select id="year"><option value="">Any</option>${years.map(y => `<option>${y}</option>`).join('')}</select></label>
-      <button data-act="copy">Copy</button>
-      <pre id="preview"></pre>
-    </details>
-    <ol class="rows">${s.ranked.map((id, i) => row(id, `
-      <button data-act="rerank" data-id="${id}">Re-rank</button>
-      <button data-act="backlog" data-id="${id}">Backlog</button>
-      <button data-act="ignored" data-id="${id}">Ignore</button>`, i + 1)).join('')}</ol>`;
+  const search = searchBox('Add a game you\'ve played');
+  if (!s.ranked.length) return `<h1>My list</h1>${search}<p>Nothing ranked yet. <a href="#rank">Start ranking</a>.</p>`;
+  const games = s.ranked.map(game);
+  const years = [...new Set(games.map(g => g.year).filter(Boolean))].sort((a, b) => b - a);
+  const decades = [...new Set(years.map(y => `${Math.floor(y / 10) * 10}s`))];
+  const plats = byCount(games.flatMap(g => g.platforms)).map(Number).filter(p => s.platforms.includes(p));
+  const l = filtered();
+  const narrowed = l.length < s.ranked.length;
+  return `<h1>My list</h1>${search}
+    <div class="filters">
+      ${select('top', [['all', 'All'], ['10', 'Top 10'], ['25', 'Top 25'], ['100', 'Top 100']])}
+      ${select('platform', [['', 'Any platform'], ...plats.map(p => [p, cat.platNames[p] ?? `Platform ${p}`])])}
+      ${select('year', [['', 'Any year'], ...decades.map(d => [d, d]), ...years.map(y => [y, y])])}
+      ${select('series', [['', 'Any series'], ...byCount(games.flatMap(g => g.series ?? [])).map(x => [x, x])])}
+    </div>
+    ${l.length ? `<ol class="rows">${l.map(({ g, rank }, i) => row(g.id, `
+      <button data-act="rerank" data-id="${g.id}">Re-rank</button>
+      <button data-act="backlog" data-id="${g.id}">Backlog</button>
+      <button data-act="ignored" data-id="${g.id}">Ignore</button>`, i + 1, narrowed && rank)).join('')}</ol>
+    <div class="list-foot">
+      <button class="primary" data-act="share">Share ${narrowed ? 'this list' : 'my list'}</button>
+      <button data-act="copy">Copy as text</button>
+    </div>` : '<p class="muted">No games match these filters.</p>'}`;
 }
 
-const row = (id, actions, num) => {
+const row = (id, actions, num, overall) => {
   const g = game(id);
-  return `<li>${num ? `<span class="num muted">${num}.</span>` : ''}<span class="thumb">${cover(g, 't_thumb')}</span><span class="name">${label(g)}</span><span class="acts">${actions}</span></li>`;
+  return `<li>${num ? `<span class="num muted">${num}.</span>` : ''}<span class="thumb">${cover(g, 't_thumb')}</span><span class="name">${label(g)}${overall ? ` <span class="muted">· #${overall} overall</span>` : ''}</span><span class="acts">${actions}</span></li>`;
 };
 
 function backlog() {
@@ -217,7 +251,14 @@ function settings() {
 
 const screens = { setup, rank, list, backlog, ignored, settings };
 
+let returnTo = null; // { id, hash }: go back here once this game is placed
+
 async function render() {
+  if (returnTo && s.lastPlaced?.id === returnTo.id) {
+    const { hash } = returnTo;
+    returnTo = null;
+    if (location.hash !== hash) return void (location.hash = hash); // hashchange renders
+  } else if (returnTo && s.current?.candidate !== returnTo.id) returnTo = null;
   const n = render.n = (render.n ?? 0) + 1; // drop results of renders that were overtaken
   let route = location.hash.slice(1) || 'rank';
   if (!s.platforms.length) route = 'setup';
@@ -233,9 +274,7 @@ async function render() {
   }
   if (n !== render.n) return;
   view.innerHTML = html;
-  const pre = document.getElementById('preview');
-  if (pre) pre.textContent = shareText();
-  if (s.lastPlaced && route === 'rank') {
+  if (s.lastPlaced) {
     toast(`Placed ${game(s.lastPlaced.id).name} at #${s.lastPlaced.rank}`);
     s.lastPlaced = null;
     save();
@@ -249,8 +288,18 @@ function act(action, id) {
     case 'undo': R.undo(s); break;
     case 'backlog': case 'ignored': R.move(s, id, action, pool()); break;
     case 'restore': R.restore(s, id, pool()); break;
-    case 'rerank': R.reRank(s, id, pool()); save(); location.hash = '#rank'; break;
+    case 'rerank':
+      R.reRank(s, id, pool());
+      if (location.hash && location.hash !== '#rank') returnTo = { id, hash: location.hash };
+      save();
+      location.hash = '#rank';
+      break;
     case 'retry': break;
+    case 'share':
+      if (navigator.share) {
+        navigator.share({ text: shareText() }).catch(err => err.name !== 'AbortError' && toast('Share failed'));
+        return;
+      } // falls through to copy
     case 'copy':
       navigator.clipboard.writeText(shareText()).then(() => toast('Copied'), () => toast('Copy failed'));
       return;
@@ -277,7 +326,10 @@ view.addEventListener('click', e => {
 });
 
 view.addEventListener('change', e => {
-  if (e.target.id === 'topn' || e.target.id === 'year') document.getElementById('preview').textContent = shareText();
+  if (e.target.dataset.filter) {
+    filters[e.target.dataset.filter] = e.target.value;
+    render();
+  }
   if (e.target.id === 'import' && e.target.files[0]) {
     e.target.files[0].text().then(async t => {
       const d = JSON.parse(t);
