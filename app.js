@@ -73,6 +73,13 @@ const topUp = shared(async () => {
   save();
 });
 
+async function platformNames(ids) {
+  const missing = ids.filter(p => !cat.platNames[p]);
+  if (!missing.length) return;
+  for (const p of await query('platforms', `fields name; where id = (${missing}); limit 500;`)) cat.platNames[p.id] = p.name;
+  save();
+}
+
 // Platform choices: counted from the 500 most-rated games overall.
 const platforms = shared(async () => {
   if (cat.platCounts) return;
@@ -80,9 +87,7 @@ const platforms = shared(async () => {
     sort total_rating_count desc; limit 500;`);
   const counts = {};
   for (const g of top) for (const p of g.platforms ?? []) counts[p] = (counts[p] ?? 0) + 1;
-  for (const p of await query('platforms', `fields name; where id = (${Object.keys(counts)}); limit 500;`)) {
-    cat.platNames[p.id] = p.name;
-  }
+  await platformNames(Object.keys(counts));
   cat.platCounts = counts;
   save();
 });
@@ -196,13 +201,14 @@ function byCount(values) {
 const select = (key, opts) => `<select data-filter="${key}" aria-label="${key}">${opts.map(([v, t]) =>
   `<option value="${esc(v)}" ${filters[key] === String(v) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>`;
 
-function list() {
+async function list() {
   const search = searchBox('Add a game you\'ve played');
   if (!s.ranked.length) return `<h1>My list</h1>${search}<p>Nothing ranked yet. <a href="#rank">Start ranking</a>.</p>`;
   const games = s.ranked.map(game);
   const years = [...new Set(games.map(g => g.year).filter(Boolean))].sort((a, b) => b - a);
   const decades = [...new Set(years.map(y => `${Math.floor(y / 10) * 10}s`))];
   const plats = byCount(games.flatMap(g => g.platforms)).map(Number).filter(p => s.platforms.includes(p));
+  await platformNames(plats);
   const l = filtered();
   const narrowed = l.length < s.ranked.length;
   return `<h1>My list</h1>${search}
