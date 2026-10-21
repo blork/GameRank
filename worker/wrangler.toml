@@ -5,4 +5,9 @@ compatibility_date = "2025-09-01"
 [vars]
 ALLOWED_ORIGINS = "https://www.sam-oakley.co.uk,http://www.sam-oakley.co.uk,https://blork.github.io,http://localhost:8765"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "gamerank"
+database_id = "e8905d4e-1cc2-4172-b98a-f0e649f50110"
+
 # Secrets (not in this file): npx wrangler secret put TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET

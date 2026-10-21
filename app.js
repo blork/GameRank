@@ -18,7 +18,120 @@ function readJSON(key) {
 }
 
 function save() {
+  const now = syncable();
+  if (now !== lastSaved) { // a real change, not just a re-render
+    if (lastSaved !== null) s.updated = Date.now();
+    lastSaved = now;
+  }
   try { localStorage.setItem(KEY, JSON.stringify(s)); localStorage.setItem(CAT, JSON.stringify(cat)); } catch {}
+  if (auth && now !== lastSent) { clearTimeout(syncTimer); syncTimer = setTimeout(push, 2000); }
+}
+
+// ---- account sync (passkeys; the Worker stores the list in D1) ----
+
+const AUTH = 'gamerank:auth';
+let auth = readJSON(AUTH); // { token, synced } when signed in
+let lastSaved = null, lastSent = null, syncTimer = null;
+const webauthn = () => import('https://cdn.jsdelivr.net/npm/@simplewebauthn/browser@14.0.0/+esm');
+
+// Everything syncs except this device's undo history and toast state.
+function syncable() {
+  const { history, lastPlaced, updated, ...rest } = s;
+  return JSON.stringify(rest);
+}
+
+function setAuth(a) {
+  auth = a;
+  try { a ? localStorage.setItem(AUTH, JSON.stringify(a)) : localStorage.removeItem(AUTH); } catch {}
+}
+
+async function api(method, path, body) {
+  const r = await fetch(`${API}${path}`, { method, body: body && JSON.stringify(body),
+    headers: { 'Content-Type': 'application/json', ...(auth && { Authorization: `Bearer ${auth.token}` }) } });
+  const j = await r.json().catch(() => null);
+  if (r.status === 401 && auth && path === '/list') { setAuth(null); toast('Signed out. Sign in again in Settings.'); }
+  if (!r.ok) throw new Error(j?.error ?? `${r.status}`);
+  return j;
+}
+
+// ponytail: last write wins; two devices editing at once can overwrite each other.
+async function push() {
+  const body = syncable();
+  s.updated ??= Date.now();
+  try {
+    await api('PUT', '/list', { data: JSON.parse(body), updated: s.updated });
+    lastSent = body;
+    setAuth({ ...auth, synced: Date.now() });
+  } catch {
+    if (auth) { clearTimeout(syncTimer); syncTimer = setTimeout(push, 30000); }
+  }
+}
+
+function adopt(remote) {
+  s = withDefaults({ ...remote.data, updated: remote.updated });
+  lastSaved = lastSent = syncable();
+  save();
+  render();
+}
+
+// Newer copy wins: take the account's list or send this device's.
+async function pull() {
+  if (!auth) return;
+  try {
+    const remote = await api('GET', '/list');
+    if (remote && remote.updated > (s.updated ?? 0)) adopt(remote);
+    else if (!remote || remote.updated < (s.updated ?? 0)) push();
+    else lastSent = syncable();
+  } catch {}
+}
+
+const hasData = st => st.ranked.length + st.backlog.length + st.ignored.length > 0;
+const passkeyError = err => err.name !== 'NotAllowedError' && toast(`Passkey failed: ${err.message}`); // NotAllowed = cancelled
+
+async function signUp() {
+  try {
+    const { startRegistration } = await webauthn();
+    const { challengeId, options } = await api('POST', '/auth/register/options');
+    const response = await startRegistration({ optionsJSON: options });
+    setAuth(await api('POST', '/auth/register/verify', { challengeId, response }));
+    await push();
+    toast('Account created. Your list now syncs.');
+    render();
+  } catch (err) { passkeyError(err); }
+}
+
+async function signIn() {
+  try {
+    const { startAuthentication } = await webauthn();
+    const { challengeId, options } = await api('POST', '/auth/login/options');
+    const response = await startAuthentication({ optionsJSON: options });
+    setAuth(await api('POST', '/auth/login/verify', { challengeId, response }));
+    const remote = await api('GET', '/list');
+    if (!remote) await push();
+    else if (!hasData(s)) adopt(remote);
+    else if (confirm(`Use your account's list (${remote.data.ranked.length} ranked) on this device?\n\n` +
+                     `This device's list (${s.ranked.length} ranked) will be replaced.`)) adopt(remote);
+    else if (confirm(`Replace your account's list with this device's list instead?`)) await push();
+    else { await signOut(); return; }
+    toast('Signed in. Your list now syncs.');
+    render();
+  } catch (err) { passkeyError(err); }
+}
+
+async function signOut() {
+  await api('POST', '/auth/logout').catch(() => {});
+  setAuth(null);
+  render();
+}
+
+async function deleteAccount() {
+  if (!confirm('Delete your account and the list saved in it? The list on this device stays.')) return;
+  try {
+    await api('DELETE', '/account');
+    setAuth(null);
+    toast('Account deleted. You can remove the GameRank passkey from your password manager.');
+    render();
+  } catch (err) { toast(`Delete failed: ${err.message}`); }
 }
 
 async function query(endpoint, q) {
@@ -249,8 +362,21 @@ function ignored() {
     <button data-act="restore" data-id="${id}">Restore</button>`)).join('')}</ul>`;
 }
 
+function account() {
+  if (!window.PublicKeyCredential) return '<p class="muted">This browser doesn\'t support passkeys, so your list stays on this device.</p>';
+  if (!auth) return `<p>Save your list to an account so it follows you to your other devices. It uses a passkey
+      (Face ID, Touch ID or your device PIN): no email or password.</p>
+    <p><button class="primary" data-act="signup">Save my list with a passkey</button>
+       <button data-act="signin">Sign in with a passkey</button></p>`;
+  return `<p>Signed in with a passkey. Your list syncs automatically${auth.synced
+      ? ` (last saved ${new Date(auth.synced).toLocaleString()})` : ''}.</p>
+    <p><button data-act="signout">Sign out</button> <button data-act="delete-account" class="danger">Delete account</button></p>`;
+}
+
 function settings() {
   return `<h1>Settings</h1>
+    <h2>Account</h2>${account()}
+    <h2>Data</h2>
     <p><a href="#setup">Change platforms</a></p>
     <p><button data-act="export">Export data</button>
        <label class="button">Import data<input type="file" id="import" accept=".json,application/json" hidden></label></p>
@@ -321,8 +447,12 @@ function act(action, id) {
       a.click();
       return;
     }
+    case 'signup': signUp(); return;
+    case 'signin': signIn(); return;
+    case 'signout': signOut(); return;
+    case 'delete-account': deleteAccount(); return;
     case 'reset':
-      if (!confirm('Delete all rankings, backlog and ignored games?')) return;
+      if (!confirm(`Delete all rankings, backlog and ignored games${auth ? ', here and in your account' : ''}?`)) return;
       s = R.fresh();
       break;
   }
@@ -378,6 +508,10 @@ document.addEventListener('keydown', e => {
 });
 
 addEventListener('hashchange', render);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') pull();
+  else if (auth && syncable() !== lastSent) push();
+});
 
 // Saved or imported state may predate newer fields.
 function withDefaults(saved) {
@@ -386,4 +520,6 @@ function withDefaults(saved) {
 }
 
 s = withDefaults(readJSON(KEY));
+lastSaved = syncable();
 render();
+pull();

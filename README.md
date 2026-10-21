@@ -14,8 +14,11 @@ node rank.test.mjs
 ```
 
 ## Worker (`worker/`)
-Proxies `GET /{games|platforms}?q=<IGDB query>` to the IGDB API, keeping the Twitch secret server-side.
 Live at https://gamerank.crimson-wave-94ca.workers.dev.
+- `GET /{games|platforms}?q=<IGDB query>`: IGDB proxy, keeping the Twitch secret server-side.
+- Passkey accounts (`/auth/...`) and `GET|PUT /list`: the signed-in account's list, stored in the D1 database `gamerank` (tables in `schema.sql`).
+
+Check accounts and sync end to end with a software passkey: `npm install`, then `npm test` against `npx wrangler dev` (see `api.test.mjs`).
 
 ```
 cd worker
@@ -31,6 +34,6 @@ Pages deploys `main` automatically: https://www.sam-oakley.co.uk/GameRank/
 ## Files
 - `rank.js`: binary-insertion ranking, no DOM (port target for iOS)
 - `app.js`: screens, storage, IGDB queries via the Worker
-- `worker/index.js`: IGDB proxy
+- `worker/index.js`: IGDB proxy, passkey accounts, list storage
 
 Game data and covers from [IGDB](https://www.igdb.com).
