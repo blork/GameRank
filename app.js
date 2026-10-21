@@ -224,7 +224,7 @@ async function rank() {
   const c = s.current;
   await platformNames(p.flatMap(id => game(id).platforms));
   const skippable = id => id === c.candidate || c.opponent != null;
-  const plats = g => g.platforms.filter(pl => !s.hiddenPlatforms.includes(pl))
+  const plats = [...new Set(p.flatMap(id => game(id).platforms))].filter(pl => !s.hiddenPlatforms.includes(pl))
     .map(pl => `<button data-act="hide-platform" data-id="${pl}">${esc(cat.platNames[pl] ?? `Platform ${pl}`)}</button>`).join('');
   const card = (id, key) => {
     const g = game(id);
@@ -232,9 +232,7 @@ async function rank() {
       <button class="card" data-act="choose" data-id="${id}" title="Pick (${key})">${cover(g, 't_cover_big')}<span>${label(g)}</span></button>
       ${skippable(id) ? `<div class="skip">Not played:
         <button data-act="backlog" data-id="${id}">Want to play</button>
-        <button data-act="ignored" data-id="${id}">Not interested</button></div>
-        <details class="hide-plat"><summary>Never had one of these?</summary>
-          <p class="muted">Hide a platform and games only on it stop coming up.</p><div class="skip">${plats(g)}</div></details>`
+        <button data-act="ignored" data-id="${id}">Not interested</button></div>`
         : '<div class="skip muted">In your list</div>'}
     </div>`;
   };
@@ -245,7 +243,10 @@ async function rank() {
     <div class="controls">
       <button data-act="tie">Too close to call</button>
       <button data-act="undo" ${s.history.length ? '' : 'disabled'}>Undo</button>
-    </div>${stats}${search}`;
+    </div>
+    ${plats && `<details class="hide-plat"><summary>Never had one of these platforms?</summary>
+      <p class="muted">Hide a platform and games only on it stop coming up.</p><div class="skip">${plats}</div></details>`}
+    ${stats}${search}`;
 }
 
 const searchBox = placeholder => `<form id="search" class="search">
