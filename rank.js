@@ -5,11 +5,12 @@
 const POOL = 50;
 const HISTORY = 20;
 const REMATCH_SHARE = 0.25; // of comparisons, once REMATCH_MIN games are ranked
-const REMATCH_MIN = 20;
+const REMATCH_MIN = 20;      // ranked games before rematches start
+const REMATCH_YEAR_MIN = 5;  // ...in year mode, ranked games from that year
 const REMATCH_FAR = 0.1;    // share of rematches against a distant game
 
 export function fresh() {
-  return { version: 1, hiddenPlatforms: [], ranked: [], backlog: [], ignored: [],
+  return { version: 1, year: null, hiddenPlatforms: [], ranked: [], backlog: [], ignored: [],
            current: null, history: [], stats: { comparisons: 0, rematches: 0, agreed: 0 },
            seen: {}, rematchDue: 0, lastPlaced: null };
 }
@@ -50,13 +51,22 @@ function start(s, id, games, rand) {
   s.current = { candidate: id, opponent, flip: rand() < 0.5 };
 }
 
-// Rematch a ranked game, skewed to the top and to games not compared recently,
-// against a neighbour 1-4 places away (sometimes a distant game).
-function rematch(s, rand) {
-  const n = s.ranked.length, seen = id => s.seen[id] ?? -1;
+// Ranked games rematches draw from: all of them, or in year mode (s.year) that year's
+// games among `games` (ranked games outside `games` are left out).
+function rematchable(s, games) {
+  if (s.year == null) return s.ranked.length >= REMATCH_MIN ? s.ranked : [];
+  const ofYear = new Set(games.filter(g => g.year === s.year).map(g => g.id));
+  const list = s.ranked.filter(id => ofYear.has(id));
+  return list.length >= REMATCH_YEAR_MIN ? list : [];
+}
+
+// Rematch a game from `list` (ranked order), skewed to the top and to games not compared
+// recently, against a neighbour in `list` 1-4 places away (sometimes a distant one).
+function rematch(s, list, rand) {
+  const n = list.length, seen = id => s.seen[id] ?? -1;
   const top = () => Math.floor(n * rand() ** 2);
   let i = top();
-  for (let k = 0; k < 4; k++) { const j = top(); if (seen(s.ranked[j]) < seen(s.ranked[i])) i = j; }
+  for (let k = 0; k < 4; k++) { const j = top(); if (seen(list[j]) < seen(list[i])) i = j; }
   let j;
   if (rand() < REMATCH_FAR) {
     do j = Math.floor(rand() * n); while (j === i);
@@ -67,14 +77,15 @@ function rematch(s, rand) {
     j = Math.max(0, Math.min(n - 1, j));
     if (j === i) j = i ? i - 1 : 1;
   }
-  return { rematch: [s.ranked[Math.min(i, j)], s.ranked[Math.max(i, j)]], flip: rand() < 0.5 };
+  return { rematch: [list[Math.min(i, j)], list[Math.max(i, j)]], flip: rand() < 0.5 };
 }
 
 export function ensureCurrent(s, games, rand = Math.random) {
   if (s.current) return;
-  if (s.rematchDue >= 1 && s.ranked.length >= REMATCH_MIN) {
+  const list = s.rematchDue >= 1 ? rematchable(s, games) : [];
+  if (list.length) {
     s.rematchDue--;
-    s.current = rematch(s, rand);
+    s.current = rematch(s, list, rand);
     return;
   }
   start(s, pick(s, games, rand), games, rand);
@@ -100,7 +111,9 @@ function count(s) {
   for (const id of pair(s)) s.seen[id] = s.stats.comparisons;
   s.stats.comparisons++;
   if (s.current.rematch) s.stats.rematches++;
-  else if (s.ranked.length >= REMATCH_MIN) s.rematchDue += REMATCH_SHARE / (1 - REMATCH_SHARE);
+  else if (s.ranked.length >= REMATCH_YEAR_MIN) {
+    s.rematchDue = Math.min(3, s.rematchDue + REMATCH_SHARE / (1 - REMATCH_SHARE));
+  }
 }
 
 export function choose(s, winner, games, rand = Math.random) {

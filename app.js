@@ -9,8 +9,9 @@ const POOL_MIN = 50;
 const view = document.getElementById('view');
 const toastEl = document.getElementById('toast');
 
-let cat = Object.assign({ games: {}, platNames: {}, pool: null },
+let cat = Object.assign({ games: {}, platNames: {}, pools: {} },
   readJSON(CAT));
+delete cat.pool; // replaced by per-mode pools
 let s = R.fresh();
 
 function readJSON(key) {
@@ -153,7 +154,8 @@ function addGames(list) {
 }
 
 const game = id => cat.games[id];
-const pool = () => (cat.pool?.ids ?? []).map(game);
+const poolKey = () => (s.year == null ? 'all' : `y${s.year}`);
+const pool = () => (cat.pools[poolKey()]?.ids ?? []).map(game);
 const userIds = () => [...s.ranked, ...s.backlog, ...s.ignored,
   ...(s.current ? [s.current.candidate, s.current.opponent] : [])].filter(id => id != null);
 
@@ -173,16 +175,19 @@ const shared = fn => () => (fn.p ??= fn().finally(() => { fn.p = null; }));
 
 // Keep at least POOL_MIN unplayed candidates not only on hidden platforms, most popular first.
 // ponytail: hidden platforms are filtered here, not in the query; hiding most platforms means fetching many pages.
+// In year mode, only games first released that year (and already out); new games have few ratings.
 const topUp = shared(async () => {
-  if (cat.pool?.key !== 'all') cat.pool = { key: 'all', ids: [], offset: 0, done: false };
+  const pl = cat.pools[poolKey()] ??= { ids: [], offset: 0, done: false };
   const used = new Set(userIds());
-  const unplayed = () => cat.pool.ids.filter(id => !used.has(id) && R.eligible(s, game(id))).length;
-  while (!cat.pool.done && unplayed() < POOL_MIN) {
-    const page = await query('games', `${FIELDS} where platforms != null & total_rating_count > 5 & ${TYPES};
-      sort total_rating_count desc; limit 500; offset ${cat.pool.offset};`);
-    cat.pool.ids.push(...addGames(page));
-    cat.pool.offset += 500;
-    cat.pool.done = page.length < 500;
+  const unplayed = () => pl.ids.filter(id => !used.has(id) && R.eligible(s, game(id))).length;
+  const when = s.year == null ? 'total_rating_count > 5' : `total_rating_count > 0 & first_release_date >= ${
+    Date.UTC(s.year, 0) / 1000} & first_release_date < ${Math.floor(Math.min(Date.UTC(s.year + 1, 0), Date.now()) / 1000)}`;
+  while (!pl.done && unplayed() < POOL_MIN) {
+    const page = await query('games', `${FIELDS} where platforms != null & ${when} & ${TYPES};
+      sort total_rating_count desc; limit 500; offset ${pl.offset};`);
+    pl.ids.push(...addGames(page));
+    pl.offset += 500;
+    pl.done = page.length < 500;
   }
   save();
 });
@@ -220,7 +225,13 @@ async function rank() {
   const stats = `<p class="muted">${s.ranked.length} ranked · ${comparisons} comparisons${rematches
     ? ` · rematches agree ${Math.round(100 * agreed / rematches)}% (${rematches})` : ''}</p>`;
   const search = searchBox('Played something not shown? Search IGDB');
-  if (!p) return `<h1>No games left</h1><p>Every game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
+  const thisYear = new Date().getFullYear();
+  const ofYear = s.year != null && s.ranked.filter(id => game(id)?.year === s.year).length;
+  const mode = `<div class="mode"><label>Games from <select data-mode aria-label="Games from">
+      <option value="">All years</option>${Array.from({ length: thisYear - 1970 }, (_, i) => thisYear - i)
+        .map(y => `<option ${s.year === y ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
+      ${s.year != null ? `<a href="#list" data-act="year-list">Your ${s.year} list (${ofYear})</a>` : ''}</div>`;
+  if (!p) return `${mode}<h1>No games left</h1><p>Every ${s.year ? `${s.year} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
   const c = s.current;
   await platformNames(p.flatMap(id => game(id).platforms));
   const skippable = id => id === c.candidate || c.opponent != null;
@@ -238,7 +249,7 @@ async function rank() {
   };
   const left = c.rematch ? `Both are in your list. ${esc(game(c.rematch[0]).name)} is ranked higher; pick the other to move it up.`
     : c.opponent == null && `Placing ${esc(game(c.candidate).name)}: about ${Math.ceil(Math.log2(c.hi - c.lo + 1))} more`;
-  return `<h1>${c.rematch ? 'Rematch: which is better now?' : 'Which is better?'}</h1>${left ? `<p class="muted">${left}</p>` : ''}
+  return `${mode}<h1>${c.rematch ? 'Rematch: which is better now?' : 'Which is better?'}</h1>${left ? `<p class="muted">${left}</p>` : ''}
     <div class="pair">${card(p[0], '←')}${card(p[1], '→')}</div>
     <div class="controls">
       <button data-act="tie">Too close to call</button>
@@ -404,7 +415,9 @@ async function render() {
   view.innerHTML = html;
   if (s.lastPlaced) {
     const { id, rank, moved } = s.lastPlaced;
-    toast(`${moved ? 'Moved' : 'Placed'} ${game(id).name} ${moved ? 'up to' : 'at'} #${rank}`);
+    const year = game(id).year;
+    const inYear = s.year != null && year === s.year && s.ranked.filter(x => game(x)?.year === year).indexOf(id) + 1;
+    toast(`${moved ? 'Moved' : 'Placed'} ${game(id).name} ${moved ? 'up to' : 'at'} ${inYear ? `#${inYear} of ${year} (#${rank} overall)` : `#${rank}`}`);
     s.lastPlaced = null;
     save();
   }
@@ -422,6 +435,9 @@ function act(action, id) {
       toast(`Hidden ${cat.platNames[id] ?? 'platform'}. Undo or Settings brings it back.`);
       break;
     case 'show-platform': R.showPlatform(s, id); break;
+    case 'year-list':
+      Object.assign(filters, { top: 'all', platform: '', series: '', year: String(s.year) });
+      return; // the link navigates
     case 'rerank':
       R.reRank(s, id, pool());
       if (location.hash && location.hash !== '#rank') returnTo = { id, hash: location.hash };
@@ -464,6 +480,12 @@ view.addEventListener('click', e => {
 });
 
 view.addEventListener('change', e => {
+  if (e.target.hasAttribute('data-mode')) {
+    s.year = e.target.value ? Number(e.target.value) : null;
+    s.current = null; // the game being placed may not be from this year; it goes back in the pool
+    save();
+    render();
+  }
   if (e.target.dataset.filter) {
     filters[e.target.dataset.filter] = e.target.value;
     render();

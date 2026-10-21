@@ -19,7 +19,7 @@ let steps = 0, n = 0;
 let rematches = 0, eligible = 0;
 while (s.current) {
   const before = s.ranked.length;
-  if (s.ranked.length >= 20) eligible++;
+  if (s.ranked.length >= 20 && !s.current.rematch) eligible++;
   if (s.current.rematch) { rematches++; choose(s, better(pair(s)), games, rand); continue; }
   choose(s, better(pair(s)), games, rand);
   steps++;
@@ -31,7 +31,7 @@ while (s.current) {
 assert.equal(s.ranked.length, N);
 assert.equal(s.stats.agreed, s.stats.rematches);
 assert.equal(s.stats.rematches, rematches);
-assert.ok(Math.abs(rematches / eligible - 0.25) < 0.03, `rematch share ${rematches / eligible}`);
+assert.ok(Math.abs(rematches / (eligible + rematches) - 0.25) < 0.03, `rematch share ${rematches / (eligible + rematches)}`);
 assert.deepEqual(s.ranked, [...s.ranked].sort((a, b) => score.get(a) - score.get(b)));
 
 // 2. "Not played" moves the candidate out and starts a new one.
@@ -86,5 +86,18 @@ assert.ok([2, 3].includes(h.current.candidate));
 assert.deepEqual(h.ranked, [4]);
 undo(h);
 assert.deepEqual(h.hiddenPlatforms, []);
+
+// 7. Year mode: rematches only pair that year's games.
+const y = fresh();
+const yg = Array.from({ length: 40 }, (_, i) => ({ id: i, platforms: [1], year: i % 2 ? 2026 : 2000 }));
+y.ranked = yg.map(g => g.id);
+y.year = 2026;
+y.rematchDue = 100;
+for (let k = 0; k < 50; k++) {
+  ensureCurrent(y, yg, rand);
+  assert.ok(y.current.rematch.every(id => yg[id].year === 2026), 'year rematch picked another year');
+  choose(y, pair(y)[0], yg, rand);
+  y.current = null;
+}
 
 console.log(`ok: ranked ${N} games in ${s.stats.comparisons} comparisons (${rematches} rematches)`);
