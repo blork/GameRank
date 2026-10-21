@@ -9,7 +9,7 @@ const REMATCH_MIN = 20;
 const REMATCH_FAR = 0.1;    // share of rematches against a distant game
 
 export function fresh() {
-  return { version: 1, platforms: [], ranked: [], backlog: [], ignored: [],
+  return { version: 1, hiddenPlatforms: [], ranked: [], backlog: [], ignored: [],
            current: null, history: [], stats: { comparisons: 0, rematches: 0, agreed: 0 },
            seen: {}, rematchDue: 0, lastPlaced: null };
 }
@@ -24,12 +24,14 @@ export function undo(s) {
   if (prev) Object.assign(s, prev, { lastPlaced: null });
 }
 
+// A game is offered unless every platform it's on is hidden.
+export const eligible = (s, g) => g.platforms.some(p => !s.hiddenPlatforms.includes(p));
+
 function pick(s, games, rand, exclude = []) {
-  const plat = new Set(s.platforms);
   const used = new Set([...s.ranked, ...s.backlog, ...s.ignored, ...exclude]);
   const pool = [];
   for (const g of games) {
-    if (used.has(g.id) || !g.platforms.some(p => plat.has(p))) continue;
+    if (used.has(g.id) || !eligible(s, g)) continue;
     pool.push(g.id);
     if (pool.length === POOL) break; // games are sorted by popularity
   }
@@ -183,6 +185,24 @@ export function reRank(s, id, games, rand = Math.random) {
   s.lastPlaced = null;
   remove(s, id);
   start(s, id, games, rand);
+}
+
+// Hide a platform the user never had. Ranked games stay; an unranked game in the
+// current comparison is replaced if it's now only on hidden platforms.
+export function hidePlatform(s, platform, games, rand = Math.random) {
+  snapshot(s);
+  s.hiddenPlatforms.push(platform);
+  const c = s.current;
+  const gone = id => { // games not in `games` (e.g. from search) were picked deliberately, so they stay
+    const g = id != null && !s.ranked.includes(id) && games.find(x => x.id === id);
+    return g && !eligible(s, g);
+  };
+  if (c && !c.rematch && (gone(c.candidate) || gone(c.opponent))) { s.current = null; ensureCurrent(s, games, rand); }
+}
+
+export function showPlatform(s, platform) {
+  snapshot(s);
+  s.hiddenPlatforms = s.hiddenPlatforms.filter(p => p !== platform);
 }
 
 export function restore(s, id, games, rand = Math.random) {

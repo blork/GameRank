@@ -1,6 +1,6 @@
 // Self-check: node rank.test.mjs
 import assert from 'node:assert/strict';
-import { fresh, ensureCurrent, pair, choose, tie, move, reRank, undo } from './rank.js';
+import { fresh, ensureCurrent, pair, choose, tie, move, reRank, undo, hidePlatform } from './rank.js';
 
 let seed = 1;
 const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
@@ -14,7 +14,6 @@ const better = ([a, b]) => (score.get(a) < score.get(b) ? a : b);
 // 1. Honest answers reproduce the true order with <= ceil(log2(n+1)) comparisons per insert;
 //    rematches all agree and make up about a quarter of comparisons once 20 games are ranked.
 const s = fresh();
-s.platforms = [1];
 ensureCurrent(s, games, rand);
 let steps = 0, n = 0;
 let rematches = 0, eligible = 0;
@@ -37,7 +36,6 @@ assert.deepEqual(s.ranked, [...s.ranked].sort((a, b) => score.get(a) - score.get
 
 // 2. "Not played" moves the candidate out and starts a new one.
 const t = fresh();
-t.platforms = [1];
 ensureCurrent(t, games, rand);
 choose(t, pair(t)[0], games, rand); // bootstrap
 const cand = t.current.candidate;
@@ -63,7 +61,6 @@ assert.equal(t.current.candidate, c2);
 
 // 5. A rematch the lower game wins moves it to just above the other; "too close" changes nothing.
 const r = fresh();
-r.platforms = [1];
 r.ranked = games.slice(0, 30).map(g => g.id);
 r.current = { rematch: [r.ranked[3], r.ranked[7]], flip: false };
 const mover = r.ranked[7], above = r.ranked[3];
@@ -77,5 +74,17 @@ r.current = { rematch: [r.ranked[0], r.ranked[1]], flip: true };
 tie(r, games, rand);
 assert.deepEqual(r.ranked, order);
 assert.equal(r.stats.agreed, 1);
+
+// 6. Hiding a platform skips games only on it, keeps multi-platform and ranked games.
+const h = fresh();
+const hg = [{ id: 1, platforms: [9] }, { id: 2, platforms: [9, 1] }, { id: 3, platforms: [1] }, { id: 4, platforms: [9] }];
+h.ranked = [4];
+h.current = { candidate: 1, lo: 0, hi: 1, flip: false };
+hidePlatform(h, 9, hg, () => 0);
+assert.notEqual(h.current.candidate, 1);
+assert.ok([2, 3].includes(h.current.candidate));
+assert.deepEqual(h.ranked, [4]);
+undo(h);
+assert.deepEqual(h.hiddenPlatforms, []);
 
 console.log(`ok: ranked ${N} games in ${s.stats.comparisons} comparisons (${rematches} rematches)`);

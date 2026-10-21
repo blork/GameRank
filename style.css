@@ -38,8 +38,9 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .skip button { font-size: .85rem; padding: 4px 8px; }
 .controls { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
 
-.plats { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px; margin-bottom: 16px; }
-.plats label { display: flex; gap: 6px; align-items: center; }
+.hide-plat { font-size: .85rem; }
+.hide-plat summary { cursor: pointer; color: var(--muted); }
+.hide-plat p { margin: 4px 0; }
 
 .rows { padding: 0; list-style: none; }
 .rows li { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--line); }

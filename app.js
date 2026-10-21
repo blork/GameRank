@@ -9,7 +9,7 @@ const POOL_MIN = 50;
 const view = document.getElementById('view');
 const toastEl = document.getElementById('toast');
 
-let cat = Object.assign({ games: {}, platNames: {}, platCounts: null, pool: null },
+let cat = Object.assign({ games: {}, platNames: {}, pool: null },
   readJSON(CAT));
 let s = R.fresh();
 
@@ -171,13 +171,14 @@ async function ensureDetails() {
 // Concurrent renders share one in-flight call instead of fetching the same page twice.
 const shared = fn => () => (fn.p ??= fn().finally(() => { fn.p = null; }));
 
-// Keep at least POOL_MIN unplayed candidates for the selected platforms, most popular first.
+// Keep at least POOL_MIN unplayed candidates not only on hidden platforms, most popular first.
+// ponytail: hidden platforms are filtered here, not in the query; hiding most platforms means fetching many pages.
 const topUp = shared(async () => {
-  const key = [...s.platforms].sort().join();
-  if (cat.pool?.key !== key) cat.pool = { key, ids: [], offset: 0, done: false };
+  if (cat.pool?.key !== 'all') cat.pool = { key: 'all', ids: [], offset: 0, done: false };
   const used = new Set(userIds());
-  while (!cat.pool.done && cat.pool.ids.filter(id => !used.has(id)).length < POOL_MIN) {
-    const page = await query('games', `${FIELDS} where platforms = (${key}) & total_rating_count > 5 & ${TYPES};
+  const unplayed = () => cat.pool.ids.filter(id => !used.has(id) && R.eligible(s, game(id))).length;
+  while (!cat.pool.done && unplayed() < POOL_MIN) {
+    const page = await query('games', `${FIELDS} where platforms != null & total_rating_count > 5 & ${TYPES};
       sort total_rating_count desc; limit 500; offset ${cat.pool.offset};`);
     cat.pool.ids.push(...addGames(page));
     cat.pool.offset += 500;
@@ -193,17 +194,6 @@ async function platformNames(ids) {
   save();
 }
 
-// Platform choices: counted from the 500 most-rated games overall.
-const platforms = shared(async () => {
-  if (cat.platCounts) return;
-  const top = await query('games', `fields platforms; where total_rating_count > 10 & ${TYPES};
-    sort total_rating_count desc; limit 500;`);
-  const counts = {};
-  for (const g of top) for (const p of g.platforms ?? []) counts[p] = (counts[p] ?? 0) + 1;
-  await platformNames(Object.keys(counts));
-  cat.platCounts = counts;
-  save();
-});
 
 const esc = t => String(t ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const cover = (g, size) => g.cover
@@ -220,18 +210,6 @@ function toast(msg) {
 
 // ---- screens ----
 
-async function setup() {
-  await platforms();
-  const counts = cat.platCounts;
-  const sel = new Set(s.platforms);
-  const plats = Object.keys(counts).map(Number).sort((a, b) => counts[b] - counts[a]);
-  return `<h1>Which platforms have you played on?</h1>
-    <form id="setup">
-      <div class="plats">${plats.map(p => `<label><input type="checkbox" value="${p}" ${sel.has(p) ? 'checked' : ''}>
-        ${esc(cat.platNames[p] ?? `Platform ${p}`)}</label>`).join('')}</div>
-      <button class="primary">Save</button>
-    </form>`;
-}
 
 async function rank() {
   await topUp();
@@ -242,16 +220,22 @@ async function rank() {
   const stats = `<p class="muted">${s.ranked.length} ranked · ${comparisons} comparisons${rematches
     ? ` · rematches agree ${Math.round(100 * agreed / rematches)}% (${rematches})` : ''}</p>`;
   const search = searchBox('Played something not shown? Search IGDB');
-  if (!p) return `<h1>No games left</h1><p>Every game on your platforms is ranked, backlogged or ignored.</p>${stats}${search}`;
+  if (!p) return `<h1>No games left</h1><p>Every game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
   const c = s.current;
+  await platformNames(p.flatMap(id => game(id).platforms));
   const skippable = id => id === c.candidate || c.opponent != null;
+  const plats = g => g.platforms.filter(pl => !s.hiddenPlatforms.includes(pl))
+    .map(pl => `<button data-act="hide-platform" data-id="${pl}">${esc(cat.platNames[pl] ?? `Platform ${pl}`)}</button>`).join('');
   const card = (id, key) => {
     const g = game(id);
     return `<div class="side">
       <button class="card" data-act="choose" data-id="${id}" title="Pick (${key})">${cover(g, 't_cover_big')}<span>${label(g)}</span></button>
       ${skippable(id) ? `<div class="skip">Not played:
         <button data-act="backlog" data-id="${id}">Want to play</button>
-        <button data-act="ignored" data-id="${id}">Not interested</button></div>` : '<div class="skip muted">In your list</div>'}
+        <button data-act="ignored" data-id="${id}">Not interested</button></div>
+        <details class="hide-plat"><summary>Never had one of these?</summary>
+          <p class="muted">Hide a platform and games only on it stop coming up.</p><div class="skip">${plats(g)}</div></details>`
+        : '<div class="skip muted">In your list</div>'}
     </div>`;
   };
   const left = c.rematch ? `Both are in your list. ${esc(game(c.rematch[0]).name)} is ranked higher; pick the other to move it up.`
@@ -323,7 +307,7 @@ async function list() {
   const games = s.ranked.map(game);
   const years = [...new Set(games.map(g => g.year).filter(Boolean))].sort((a, b) => b - a);
   const decades = [...new Set(years.map(y => `${Math.floor(y / 10) * 10}s`))];
-  const plats = byCount(games.flatMap(g => g.platforms)).map(Number).filter(p => s.platforms.includes(p));
+  const plats = byCount(games.flatMap(g => g.platforms)).map(Number).filter(p => !s.hiddenPlatforms.includes(p));
   await platformNames(plats);
   const l = filtered();
   const narrowed = l.length < s.ranked.length;
@@ -373,18 +357,27 @@ function account() {
     <p><button data-act="signout">Sign out</button> <button data-act="delete-account" class="danger">Delete account</button></p>`;
 }
 
-function settings() {
+async function hiddenPlatforms() {
+  const hidden = s.hiddenPlatforms;
+  if (!hidden.length) return '<p class="muted">No hidden platforms. To hide one, open "Never had one of these?" under a game you\'re ranking.</p>';
+  await platformNames(hidden);
+  return `<p>Hidden platforms (games only on these don't come up):</p><ul class="rows">${hidden.map(p => `<li>
+    <span class="name">${esc(cat.platNames[p] ?? `Platform ${p}`)}</span>
+    <span class="acts"><button data-act="show-platform" data-id="${p}">Show again</button></span></li>`).join('')}</ul>`;
+}
+
+async function settings() {
   return `<h1>Settings</h1>
     <h2>Account</h2>${account()}
     <h2>Data</h2>
-    <p><a href="#setup">Change platforms</a></p>
+    ${await hiddenPlatforms()}
     <p><button data-act="export">Export data</button>
        <label class="button">Import data<input type="file" id="import" accept=".json,application/json" hidden></label></p>
     <p><button data-act="reset" class="danger">Reset everything</button></p>
     <p class="muted">${Object.keys(cat.games).length} games cached. Game data and covers from <a href="https://www.igdb.com">IGDB</a>.</p>`;
 }
 
-const screens = { setup, rank, list, backlog, ignored, settings };
+const screens = { rank, list, backlog, ignored, settings };
 
 let returnTo = null; // { id, hash }: go back here once this game is placed
 
@@ -396,7 +389,6 @@ async function render() {
   } else if (returnTo && s.current?.candidate !== returnTo.id) returnTo = null;
   const n = render.n = (render.n ?? 0) + 1; // drop results of renders that were overtaken
   let route = location.hash.slice(1) || 'rank';
-  if (!s.platforms.length) route = 'setup';
   if (!screens[route]) route = 'rank';
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.hash === `#${route}`));
   let html;
@@ -424,6 +416,11 @@ function act(action, id) {
     case 'undo': R.undo(s); break;
     case 'backlog': case 'ignored': R.move(s, id, action, pool()); break;
     case 'restore': R.restore(s, id, pool()); break;
+    case 'hide-platform':
+      R.hidePlatform(s, id, pool());
+      toast(`Hidden ${cat.platNames[id] ?? 'platform'}. Undo or Settings brings it back.`);
+      break;
+    case 'show-platform': R.showPlatform(s, id); break;
     case 'rerank':
       R.reRank(s, id, pool());
       if (location.hash && location.hash !== '#rank') returnTo = { id, hash: location.hash };
@@ -473,7 +470,7 @@ view.addEventListener('change', e => {
   if (e.target.id === 'import' && e.target.files[0]) {
     e.target.files[0].text().then(async t => {
       const d = JSON.parse(t);
-      if (!Array.isArray(d.ranked) || !Array.isArray(d.platforms)) throw new Error('not a GameRank export');
+      if (!Array.isArray(d.ranked)) throw new Error('not a GameRank export');
       s = withDefaults(d);
       await ensureDetails();
       save();
@@ -485,14 +482,7 @@ view.addEventListener('change', e => {
 
 view.addEventListener('submit', e => {
   e.preventDefault();
-  if (e.target.id === 'search') return searchGames(e.target.q.value);
-  const picked = [...e.target.querySelectorAll('input:checked')].map(i => Number(i.value));
-  if (!picked.length) return toast('Pick at least one platform');
-  s.platforms = picked;
-  s.current = null; // candidate may no longer match the platforms
-  save();
-  location.hash = '#rank';
-  render();
+  if (e.target.id === 'search') searchGames(e.target.q.value);
 });
 
 document.addEventListener('keydown', e => {
