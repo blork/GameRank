@@ -164,10 +164,16 @@ const POOLS = {
   acclaimed: { where: 'aggregated_rating_count >= 3 & total_rating_count > 50', sort: 'aggregated_rating', max: 1000 },
   all: { where: 'total_rating_count > 5', sort: 'total_rating_count' },
 };
-const yearPool = y => ({ sort: 'total_rating_count', where: `total_rating_count > 0 & first_release_date >= ${
-  Date.UTC(y, 0) / 1000} & first_release_date < ${Math.floor(Math.min(Date.UTC(y + 1, 0), Date.now()) / 1000)}` });
-const poolKeys = () => (s.year != null ? [`y${s.year}`] : s.ranked.length < SEED_TARGET ? ['acclaimed'] : ['acclaimed', 'all']);
-const poolSpec = key => POOLS[key] ?? yearPool(Number(key.slice(1)));
+// Year and/or platform mode: one pool for that combination, e.g. 'y2017-p130'.
+function focusPool(key) {
+  const y = Number(key.match(/y(\d+)/)?.[1]), p = key.match(/p(\d+)/)?.[1];
+  return { sort: 'total_rating_count', where: [y ? `total_rating_count > 0 & first_release_date >= ${Date.UTC(y, 0) / 1000
+    } & first_release_date < ${Math.floor(Math.min(Date.UTC(y + 1, 0), Date.now()) / 1000)}` : 'total_rating_count > 2',
+    p && `platforms = (${p})`].filter(Boolean).join(' & ') };
+}
+const focusKey = () => [s.year != null && `y${s.year}`, s.platform != null && `p${s.platform}`].filter(Boolean).join('-');
+const poolKeys = () => (focusKey() ? [focusKey()] : s.ranked.length < SEED_TARGET ? ['acclaimed'] : ['acclaimed', 'all']);
+const poolSpec = key => POOLS[key] ?? focusPool(key);
 function newGames() {
   const lists = poolKeys().map(k => (cat.pools[k]?.ids ?? []).map(game));
   return lists.length === 1 ? lists[0] : lists[0].flatMap((g, i) => [g, lists[1][i]]).concat(lists[1].slice(lists[0].length)).filter(Boolean);
@@ -181,7 +187,10 @@ async function ensureDetails() {
   }
   // ponytail: ids IGDB no longer returns are dropped
   for (const k of ['ranked', 'backlog', 'ignored']) s[k] = s[k].filter(game);
-  for (const id of s.ranked) s.ratings[id].year ??= game(id).year; // migrated lists had no years
+  for (const id of s.ranked) { // migrated or older entries lack these
+    s.ratings[id].year ??= game(id).year;
+    s.ratings[id].platforms ??= game(id).platforms;
+  }
   if (s.current && userIds().some(id => !game(id))) s.current = null;
 }
 
@@ -240,12 +249,22 @@ async function rank() {
     s.ranked.length ? ` · list confidence ${Math.round(100 * R.listConfidence(s))}%` : ''}</p>`;
   const search = searchBox('Played something not shown? Search IGDB');
   const thisYear = new Date().getFullYear();
-  const ofYear = s.year != null && s.ranked.filter(id => game(id)?.year === s.year).length;
-  const mode = `<div class="mode"><label>Games from <select data-mode aria-label="Games from">
+  // Platforms to offer: those of your ranked games and the games on offer, most common first.
+  const plat = byCount([...s.ranked.map(game), ...newGames()].flatMap(g => g?.platforms ?? [])).map(Number)
+    .filter(p => !s.hiddenPlatforms.includes(p)).slice(0, 25);
+  if (s.platform != null && !plat.includes(s.platform)) plat.unshift(s.platform);
+  await platformNames(plat);
+  const platName = p => cat.platNames[p] ?? `Platform ${p}`;
+  const focusName = [s.year, s.platform != null && platName(s.platform)].filter(Boolean).join(' ');
+  const focusCount = focusName && s.ranked.filter(id => (s.year == null || game(id)?.year === s.year) &&
+    (s.platform == null || game(id)?.platforms.includes(s.platform))).length;
+  const mode = `<div class="mode"><label>Games from <select data-mode="year" aria-label="Games from">
       <option value="">All years</option>${Array.from({ length: thisYear - 1970 }, (_, i) => thisYear - i)
         .map(y => `<option ${s.year === y ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
-      ${s.year != null ? `<a href="#list" data-act="year-list">Your ${s.year} list (${ofYear})</a>` : ''}</div>`;
-  if (!c) return `${mode}<h1>No games left</h1><p>Every ${s.year ? `${s.year} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
+      <label>on <select data-mode="platform" aria-label="Games on"><option value="">All platforms</option>${plat
+        .map(p => `<option value="${p}" ${s.platform === p ? 'selected' : ''}>${esc(platName(p))}</option>`).join('')}</select></label>
+      ${focusName ? `<a href="#list" data-act="focus-list">Your ${esc(focusName)} list (${focusCount})</a>` : ''}</div>`;
+  if (!c) return `${mode}<h1>No games left</h1><p>Every ${focusName ? `${esc(focusName)} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
   const f = c.isNew ? c.game : game(c.featured), ref = c.reference != null ? game(c.reference) : null;
   const both = [f, ref].filter(Boolean);
   await platformNames(both.flatMap(g => g.platforms));
@@ -438,8 +457,9 @@ function act(action, id) {
       toast(`Hidden ${cat.platNames[id] ?? 'platform'}. Undo or Settings brings it back.`);
       break;
     case 'show-platform': R.showPlatform(s, id); break;
-    case 'year-list':
-      Object.assign(filters, { top: 'all', platform: '', series: '', year: String(s.year) });
+    case 'focus-list':
+      Object.assign(filters, { top: 'all', series: '', year: s.year == null ? '' : String(s.year),
+                               platform: s.platform == null ? '' : String(s.platform) });
       return; // the link navigates
     case 'recheck':
       R.recheck(s, game(id), newGames());
@@ -482,9 +502,9 @@ view.addEventListener('click', e => {
 });
 
 view.addEventListener('change', e => {
-  if (e.target.hasAttribute('data-mode')) {
-    s.year = e.target.value ? Number(e.target.value) : null;
-    s.current = null; // the shown game may not be from this year; it comes up again later
+  if (e.target.dataset.mode) {
+    s[e.target.dataset.mode] = e.target.value ? Number(e.target.value) : null; // year or platform
+    s.current = null; // the shown game may not match; it comes up again later
     save();
     render();
   }

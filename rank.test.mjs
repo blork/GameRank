@@ -120,4 +120,21 @@ const play = (s, gs, steps, better) => {
   assert.ok(!('seen' in s) && !('rematchDue' in s));
 }
 
-console.log('ok: convergence, cooldown, seeding spread, undo, platforms, recheck, year mode, migration');
+// 8. Platform mode: rechecked games come from that platform once 5 are ranked.
+{
+  const gs = games(40).map((g, i) => ({ ...g, platforms: i % 3 ? [1] : [1, 7] })), s = R.fresh();
+  R.next(s, gs, rand);
+  play(s, gs, 400, c => c.featured < c.reference);
+  // fewer than 5 ranked on platform 9: only new platform-9 games are offered
+  s.platform = 9;
+  s.current = null;
+  const nine = [{ id: 901, platforms: [9], year: 2000 }, { id: 902, platforms: [9], year: 2000 }];
+  for (let k = 0; k < 20; k++) { s.current = null; R.next(s, nine, rand); assert.ok(s.current.isNew, 'offered a ranked game from another platform'); }
+  s.platform = 7;
+  s.current = null;
+  R.next(s, [], rand);
+  const seen = play(s, gs, 100, c => c.featured < c.reference);
+  assert.ok(seen.every(c => s.ratings[c.featured].platforms.includes(7)), 'featured from another platform');
+}
+
+console.log('ok: convergence, cooldown, seeding spread, undo, platforms, recheck, year mode, migration, platform mode');

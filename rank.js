@@ -10,12 +10,12 @@ const RD_MIN = 25;
 const DRIFT = 15;          // uncertainty regained per 100 comparisons a game sits out (opinions change)
 const SEED_TARGET = 50;    // until this many games are ranked: mostly new games, random references
 const COOLDOWN = 3;        // a featured game sits out this many comparisons
-const YEAR_MIN = 5;        // year mode prefers that year's games once this many are ranked
+const FOCUS_MIN = 5;       // year/platform mode prefers those games once this many are ranked
 const VS_MEMORY = 8;       // recent opponents a game won't be paired with again
 const Q = Math.LN10 / 400;
 
 export function fresh() {
-  return { version: 2, year: null, hiddenPlatforms: [], ranked: [], backlog: [], ignored: [],
+  return { version: 2, year: null, platform: null, hiddenPlatforms: [], ranked: [], backlog: [], ignored: [],
            ratings: {}, recent: [], current: null, history: [], stats: { comparisons: 0 } };
 }
 
@@ -40,7 +40,8 @@ export const listConfidence = s =>
 const sortRanked = s => s.ranked.sort((a, b) => s.ratings[b].r - s.ratings[a].r);
 
 function add(s, g) {
-  s.ratings[g.id] = { r: prior(g), rd: RD0, last: s.stats.comparisons, year: g.year ?? null, vs: [] };
+  s.ratings[g.id] = { r: prior(g), rd: RD0, last: s.stats.comparisons, year: g.year ?? null,
+                      platforms: g.platforms ?? [], vs: [] };
   s.ranked.push(g.id);
   sortRanked(s);
 }
@@ -71,11 +72,12 @@ const sample = (items, weight, rand) => {
   return items.at(-1);
 };
 
-// Ranked games from the chosen year, if year mode is on and there are enough of them.
-function ofYear(s) {
-  if (s.year == null) return null;
-  const list = s.ranked.filter(id => s.ratings[id].year === s.year);
-  return list.length >= YEAR_MIN ? list : null;
+// Ranked games matching the chosen year and/or platform, if either is set and there are enough.
+function focus(s) {
+  if (s.year == null && s.platform == null) return null;
+  const list = s.ranked.filter(id => (s.year == null || s.ratings[id].year === s.year) &&
+    (s.platform == null || s.ratings[id].platforms?.includes(s.platform)));
+  return list.length >= FOCUS_MIN ? list : null;
 }
 
 function pickNew(s, games, rand) {
@@ -92,7 +94,7 @@ function pickNew(s, games, rand) {
 // The least certain games, skipping ones featured in the last few comparisons
 // (with a tiny list, only the last one).
 function pickRefine(s, rand) {
-  const all = ofYear(s) ?? s.ranked;
+  const all = focus(s) ?? s.ranked;
   let list = all.filter(id => !s.recent.includes(id));
   if (!list.length) list = all.filter(id => id !== s.recent[0]);
   const top = list.map(id => [id, rdNow(s, id)]).sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -103,8 +105,8 @@ function pickRefine(s, rand) {
 // the most informative comparisons. Recent opponents are avoided.
 function pickReference(s, id, r, rd, rand) {
   const vs = s.ratings[id]?.vs ?? [];
-  const year = ofYear(s);
-  let list = (year && rand() < 0.7 ? year : s.ranked).filter(x => x !== id);
+  const focused = focus(s);
+  let list = (focused && rand() < 0.7 ? focused : s.ranked).filter(x => x !== id);
   if (list.some(x => !vs.includes(x))) list = list.filter(x => !vs.includes(x));
   if (!list.length) return null;
   if (s.ranked.length < SEED_TARGET) return list[Math.floor(rand() * list.length)];
@@ -125,7 +127,8 @@ export function next(s, games, rand = Math.random) {
     const id = s.ranked.length >= 2 ? pickRefine(s, rand) : null;
     return id != null && { featured: id, reference: pickReference(s, id, s.ratings[id].r, rdNow(s, id), rand), isNew: false };
   };
-  const wantNew = rand() < (s.ranked.length < SEED_TARGET ? 0.8 : 0.4);
+  // In year/platform mode, offer only new matching games until enough of them are ranked.
+  const wantNew = ((s.year != null || s.platform != null) && !focus(s)) || rand() < (s.ranked.length < SEED_TARGET ? 0.8 : 0.4);
   s.current = (wantNew ? newCard() || refineCard() : refineCard() || newCard()) || null;
 }
 
