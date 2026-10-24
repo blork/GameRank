@@ -1,103 +1,123 @@
 // Self-check: node rank.test.mjs
 import assert from 'node:assert/strict';
-import { fresh, ensureCurrent, pair, choose, tie, move, reRank, undo, hidePlatform } from './rank.js';
+import * as R from './rank.js';
 
 let seed = 1;
 const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
-
-const N = 300;
-const games = Array.from({ length: N }, (_, i) => ({ id: i, name: `G${i}`, platforms: [1], pop: N - i }));
-const truth = games.map(g => g.id).sort(() => rand() - 0.5); // true best-first order
-const score = new Map(truth.map((id, i) => [id, i]));
-const better = ([a, b]) => (score.get(a) < score.get(b) ? a : b);
-
-// 1. Honest answers reproduce the true order with <= ceil(log2(n+1)) comparisons per insert;
-//    rematches all agree and make up about a quarter of comparisons once 20 games are ranked.
-const s = fresh();
-ensureCurrent(s, games, rand);
-let steps = 0, n = 0;
-let rematches = 0, eligible = 0;
-while (s.current) {
-  const before = s.ranked.length;
-  if (s.ranked.length >= 20 && !s.current.rematch) eligible++;
-  if (s.current.rematch) { rematches++; choose(s, better(pair(s)), games, rand); continue; }
-  choose(s, better(pair(s)), games, rand);
-  steps++;
-  if (s.ranked.length !== before) {
-    if (before > 0) assert.ok(steps <= Math.ceil(Math.log2(before + 1)), `insert into ${before} took ${steps}`);
-    steps = 0; n++;
+const games = n => Array.from({ length: n }, (_, i) => ({ id: i + 1, platforms: [1], year: 2000 + (i % 2), critic: 90 - i / 5 }));
+const play = (s, gs, steps, better) => {
+  const featured = [];
+  for (let k = 0; k < steps && s.current; k++) {
+    const c = s.current;
+    if (c.reference == null) { R.playedIt(s, gs, rand); continue; }
+    featured.push(c);
+    R.answer(s, better(c), gs, rand);
   }
-}
-assert.equal(s.ranked.length, N);
-assert.equal(s.stats.agreed, s.stats.rematches);
-assert.equal(s.stats.rematches, rematches);
-assert.ok(Math.abs(rematches / (eligible + rematches) - 0.25) < 0.03, `rematch share ${rematches / (eligible + rematches)}`);
-assert.deepEqual(s.ranked, [...s.ranked].sort((a, b) => score.get(a) - score.get(b)));
+  return featured;
+};
 
-// 2. "Not played" moves the candidate out and starts a new one.
-const t = fresh();
-ensureCurrent(t, games, rand);
-choose(t, pair(t)[0], games, rand); // bootstrap
-const cand = t.current.candidate;
-move(t, cand, 'backlog', games, rand);
-assert.deepEqual(t.backlog, [cand]);
-assert.ok(!t.ranked.includes(cand));
-assert.notEqual(t.current.candidate, cand);
-
-// 3. Undo restores the previous state.
-const before = JSON.stringify({ ...t, history: 0 });
-choose(t, pair(t)[0], games, rand);
-undo(t);
-assert.equal(JSON.stringify({ ...t, history: 0 }), before);
-
-// 4. Tie inserts directly above the pivot; re-rank removes and restarts.
-const pivot = pair(t).find(id => id !== t.current.candidate);
-const c2 = t.current.candidate;
-tie(t, games, rand);
-assert.equal(t.ranked.indexOf(c2) + 1, t.ranked.indexOf(pivot));
-reRank(t, c2, games, rand);
-assert.ok(!t.ranked.includes(c2));
-assert.equal(t.current.candidate, c2);
-
-// 5. A rematch the lower game wins moves it to just above the other; "too close" changes nothing.
-const r = fresh();
-r.ranked = games.slice(0, 30).map(g => g.id);
-r.current = { rematch: [r.ranked[3], r.ranked[7]], flip: false };
-const mover = r.ranked[7], above = r.ranked[3];
-choose(r, mover, games, rand);
-assert.equal(r.ranked.indexOf(mover), 3);
-assert.equal(r.ranked.indexOf(above), 4);
-assert.deepEqual([r.stats.rematches, r.stats.agreed], [1, 0]);
-assert.deepEqual(r.lastPlaced, { id: mover, rank: 4, moved: true });
-const order = [...r.ranked];
-r.current = { rematch: [r.ranked[0], r.ranked[1]], flip: true };
-tie(r, games, rand);
-assert.deepEqual(r.ranked, order);
-assert.equal(r.stats.agreed, 1);
-
-// 6. Hiding a platform skips games only on it, keeps multi-platform and ranked games.
-const h = fresh();
-const hg = [{ id: 1, platforms: [9] }, { id: 2, platforms: [9, 1] }, { id: 3, platforms: [1] }, { id: 4, platforms: [9] }];
-h.ranked = [4];
-h.current = { candidate: 1, lo: 0, hi: 1, flip: false };
-hidePlatform(h, 9, hg, () => 0);
-assert.notEqual(h.current.candidate, 1);
-assert.ok([2, 3].includes(h.current.candidate));
-assert.deepEqual(h.ranked, [4]);
-undo(h);
-assert.deepEqual(h.hiddenPlatforms, []);
-
-// 7. Year mode: rematches only pair that year's games.
-const y = fresh();
-const yg = Array.from({ length: 40 }, (_, i) => ({ id: i, platforms: [1], year: i % 2 ? 2026 : 2000 }));
-y.ranked = yg.map(g => g.id);
-y.year = 2026;
-y.rematchDue = 100;
-for (let k = 0; k < 50; k++) {
-  ensureCurrent(y, yg, rand);
-  assert.ok(y.current.rematch.every(id => yg[id].year === 2026), 'year rematch picked another year');
-  choose(y, pair(y)[0], yg, rand);
-  y.current = null;
+// 1. Consistent answers converge on the true order (here: lower id is better);
+//    no game is featured twice within 3 comparisons; recent opponents aren't repeated.
+{
+  const gs = games(100), s = R.fresh();
+  R.next(s, gs, rand);
+  assert.equal(s.current.reference, null, 'first card has nothing to compare with');
+  const seen = play(s, gs, 4000, c => c.featured < c.reference);
+  assert.equal(s.ranked.length, 100);
+  const off = s.ranked.reduce((t, id, i) => t + Math.abs(id - 1 - i), 0) / 100;
+  assert.ok(off < 3, `average places off ${off}`);
+  assert.ok(s.ranked.slice(0, 10).filter(id => id <= 10).length >= 8, 'top 10');
+  for (let i = 10; i < seen.length; i++) {
+    const prev = seen.slice(i - 3, i).map(c => c.featured);
+    assert.ok(!prev.includes(seen[i].featured), `featured ${seen[i].featured} again within 3`);
+  }
+  for (let i = 1; i < seen.length; i++) {
+    assert.ok(!(seen[i].featured === seen[i - 1].featured && seen[i].reference === seen[i - 1].reference), 'same pair twice in a row');
+  }
+  assert.ok(R.listConfidence(s) > 0.5, `confidence ${R.listConfidence(s)}`);
 }
 
-console.log(`ok: ranked ${N} games in ${s.stats.comparisons} comparisons (${rematches} rematches)`);
+// 2. While seeding (< 50 ranked), references are spread across the list, not just near neighbours.
+{
+  const gs = games(20), s = R.fresh();
+  R.next(s, gs, rand);
+  play(s, gs, 30, c => c.featured < c.reference);
+  const counts = {};
+  for (let k = 0; k < 4000; k++) {
+    s.current = null;
+    R.next(s, gs, rand);
+    if (s.current?.reference != null) counts[s.current.reference] = (counts[s.current.reference] ?? 0) + 1;
+  }
+  const n = Object.values(counts);
+  assert.equal(n.length, s.ranked.length, 'every ranked game used as a reference');
+  assert.ok(Math.min(...n) > 0.4 * Math.max(...n), `seeding references uneven: ${n}`);
+}
+
+// 3. Undo after answering about a new game removes it again; Haven't played / Want to play.
+{
+  const gs = games(10), s = R.fresh();
+  R.next(s, gs, rand);
+  R.playedIt(s, gs, rand);
+  const before = JSON.stringify({ ranked: s.ranked, ratings: s.ratings });
+  const c = s.current;
+  assert.ok(c.isNew && c.reference != null);
+  R.answer(s, true, gs, rand);
+  assert.ok(s.ranked.includes(c.featured));
+  R.undo(s);
+  assert.equal(JSON.stringify({ ranked: s.ranked, ratings: s.ratings }), before);
+  assert.equal(s.current.featured, c.featured);
+  R.move(s, c.featured, 'ignored', gs, rand);
+  assert.deepEqual(s.ignored, [c.featured]);
+  assert.ok(!s.ratings[c.featured] && s.current.featured !== c.featured);
+}
+
+// 4. Hiding a platform replaces a new featured game that's only on it.
+{
+  const gs = [{ id: 1, platforms: [1] }, { id: 2, platforms: [9] }, { id: 3, platforms: [9, 1] }];
+  const s = R.fresh();
+  s.current = { featured: 2, reference: null, isNew: true, game: gs[1] };
+  R.hidePlatform(s, 9, gs, () => 0);
+  assert.notEqual(s.current.featured, 2);
+  R.undo(s);
+  assert.deepEqual(s.hiddenPlatforms, []);
+}
+
+// 5. Recheck: a searched (unranked) game is added and featured next; a ranked one becomes uncertain.
+{
+  const gs = games(30), s = R.fresh();
+  R.next(s, gs, rand);
+  play(s, gs, 200, c => c.featured < c.reference);
+  const outsider = { id: 999, platforms: [1], year: 1999, critic: 80 };
+  R.recheck(s, outsider, gs, rand);
+  assert.equal(s.current.featured, 999);
+  assert.ok(s.ranked.includes(999) && !s.current.isNew);
+  const top = s.ranked[0], c0 = R.confidence(s, top);
+  s.current = null;
+  R.recheck(s, gs[0], gs, rand);
+  assert.ok(R.confidence(s, top) <= c0 && s.current.featured === gs[0].id);
+}
+
+// 6. Year mode: rechecked games and most references come from that year once 5 are ranked.
+{
+  const gs = games(60), s = R.fresh();
+  R.next(s, gs, rand);
+  play(s, gs, 600, c => c.featured < c.reference);
+  R.setYear(s, 2001, [], rand); // no new games: refine only
+  const seen = play(s, gs, 300, c => c.featured < c.reference);
+  const yearOf = id => (id % 2 ? 2000 : 2001); // games(): odd ids are 2000
+  assert.ok(seen.every(c => yearOf(c.featured) === 2001), 'featured from another year');
+  assert.ok(seen.filter(c => yearOf(c.reference) === 2001).length > 0.6 * seen.length, 'references mostly that year');
+}
+
+// 7. Migration from the old version keeps the order.
+{
+  const s = Object.assign(R.fresh(), { ranked: [5, 3, 9], ratings: {}, seen: {}, rematchDue: 1,
+    current: { candidate: 4, lo: 0, hi: 3 } });
+  R.migrate(s, () => 2010);
+  assert.deepEqual(s.ranked, [5, 3, 9]);
+  assert.ok(s.ratings[5].r > s.ratings[3].r && s.ratings[3].r > s.ratings[9].r);
+  assert.equal(s.current, null);
+  assert.ok(!('seen' in s) && !('rematchDue' in s));
+}
+
+console.log('ok: convergence, cooldown, seeding spread, undo, platforms, recheck, year mode, migration');

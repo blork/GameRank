@@ -32,7 +32,7 @@ To allow another site, add its origin to `ALLOWED_ORIGINS` in `wrangler.toml` an
 Pages deploys `main` automatically: https://www.sam-oakley.co.uk/GameRank/
 
 ## Files
-- `rank.js`: binary-insertion ranking, no DOM (port target for iOS)
+- `rank.js`: ratings with uncertainty (Glicko-1) and matchmaking, no DOM (port target for iOS)
 - `app.js`: screens, storage, IGDB queries via the Worker
 - `worker/index.js`: IGDB proxy, passkey accounts, list storage
 

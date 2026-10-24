@@ -2,16 +2,16 @@ import * as R from './rank.js';
 
 const API = 'https://gamerank.crimson-wave-94ca.workers.dev';
 const KEY = 'gamerank:v2';
-const CAT = 'gamerank:catalogue:v2'; // disposable cache of game details and the candidate pool
-const FIELDS = 'fields name,first_release_date,cover.image_id,platforms,total_rating_count,franchises.name,collections.name;';
+const CAT = 'gamerank:catalogue:v3'; // disposable cache of game details and the candidate pools
+const FIELDS = 'fields name,first_release_date,cover.image_id,platforms,total_rating_count,franchises.name,collections.name,aggregated_rating,total_rating;';
 const TYPES = 'game_type = (0,4,8,9,10)'; // main, standalone expansion, remake, remaster, expanded
 const POOL_MIN = 50;
+const SEED_TARGET = 50; // matches rank.js: new players start on acclaimed games
 const view = document.getElementById('view');
 const toastEl = document.getElementById('toast');
 
 let cat = Object.assign({ games: {}, platNames: {}, pools: {} },
   readJSON(CAT));
-delete cat.pool; // replaced by per-mode pools
 let s = R.fresh();
 
 function readJSON(key) {
@@ -148,16 +148,30 @@ function addGames(list) {
       year: g.first_release_date ? new Date(g.first_release_date * 1000).getUTCFullYear() : null,
       cover: g.cover?.image_id ?? null, platforms: g.platforms ?? [], pop: g.total_rating_count ?? 0,
       series: [...new Set([...g.franchises ?? [], ...g.collections ?? []].map(x => x.name))],
+      critic: g.aggregated_rating ?? g.total_rating ?? null, // starting rating
     };
   }
   return list.map(g => g.id);
 }
 
 const game = id => cat.games[id];
-const poolKey = () => (s.year == null ? 'all' : `y${s.year}`);
-const pool = () => (cat.pools[poolKey()]?.ids ?? []).map(game);
 const userIds = () => [...s.ranked, ...s.backlog, ...s.ignored,
-  ...(s.current ? [s.current.candidate, s.current.opponent] : [])].filter(id => id != null);
+  ...(s.current ? [s.current.featured, s.current.reference] : [])].filter(id => id != null);
+
+// Where new games come from: that year's games in year mode; otherwise the critics' top
+// 1000 for a new player, then those and the most-rated games, alternately.
+const POOLS = {
+  acclaimed: { where: 'aggregated_rating_count >= 3 & total_rating_count > 50', sort: 'aggregated_rating', max: 1000 },
+  all: { where: 'total_rating_count > 5', sort: 'total_rating_count' },
+};
+const yearPool = y => ({ sort: 'total_rating_count', where: `total_rating_count > 0 & first_release_date >= ${
+  Date.UTC(y, 0) / 1000} & first_release_date < ${Math.floor(Math.min(Date.UTC(y + 1, 0), Date.now()) / 1000)}` });
+const poolKeys = () => (s.year != null ? [`y${s.year}`] : s.ranked.length < SEED_TARGET ? ['acclaimed'] : ['acclaimed', 'all']);
+const poolSpec = key => POOLS[key] ?? yearPool(Number(key.slice(1)));
+function newGames() {
+  const lists = poolKeys().map(k => (cat.pools[k]?.ids ?? []).map(game));
+  return lists.length === 1 ? lists[0] : lists[0].flatMap((g, i) => [g, lists[1][i]]).concat(lists[1].slice(lists[0].length)).filter(Boolean);
+}
 
 // Fetch details for any of the user's games missing from the cache (import, cleared cache).
 async function ensureDetails() {
@@ -167,27 +181,28 @@ async function ensureDetails() {
   }
   // ponytail: ids IGDB no longer returns are dropped
   for (const k of ['ranked', 'backlog', 'ignored']) s[k] = s[k].filter(game);
+  for (const id of s.ranked) s.ratings[id].year ??= game(id).year; // migrated lists had no years
   if (s.current && userIds().some(id => !game(id))) s.current = null;
 }
 
 // Concurrent renders share one in-flight call instead of fetching the same page twice.
 const shared = fn => () => (fn.p ??= fn().finally(() => { fn.p = null; }));
 
-// Keep at least POOL_MIN unplayed candidates not only on hidden platforms, most popular first.
+// Keep at least POOL_MIN unplayed candidates (not only on hidden platforms) in each pool in use.
 // ponytail: hidden platforms are filtered here, not in the query; hiding most platforms means fetching many pages.
-// In year mode, only games first released that year (and already out); new games have few ratings.
+// Year pools only hold games already out; new games have few ratings.
 const topUp = shared(async () => {
-  const pl = cat.pools[poolKey()] ??= { ids: [], offset: 0, done: false };
   const used = new Set(userIds());
-  const unplayed = () => pl.ids.filter(id => !used.has(id) && R.eligible(s, game(id))).length;
-  const when = s.year == null ? 'total_rating_count > 5' : `total_rating_count > 0 & first_release_date >= ${
-    Date.UTC(s.year, 0) / 1000} & first_release_date < ${Math.floor(Math.min(Date.UTC(s.year + 1, 0), Date.now()) / 1000)}`;
-  while (!pl.done && unplayed() < POOL_MIN) {
-    const page = await query('games', `${FIELDS} where platforms != null & ${when} & ${TYPES};
-      sort total_rating_count desc; limit 500; offset ${pl.offset};`);
-    pl.ids.push(...addGames(page));
-    pl.offset += 500;
-    pl.done = page.length < 500;
+  for (const key of poolKeys()) {
+    const spec = poolSpec(key), pl = cat.pools[key] ??= { ids: [], offset: 0, done: false };
+    const unplayed = () => pl.ids.filter(id => !used.has(id) && R.eligible(s, game(id))).length;
+    while (!pl.done && unplayed() < POOL_MIN) {
+      const page = await query('games', `${FIELDS} where platforms != null & ${spec.where} & ${TYPES};
+        sort ${spec.sort} desc; limit 500; offset ${pl.offset};`);
+      pl.ids.push(...addGames(page));
+      pl.offset += 500;
+      pl.done = page.length < 500 || pl.offset >= (spec.max ?? Infinity);
+    }
   }
   save();
 });
@@ -218,12 +233,11 @@ function toast(msg) {
 
 async function rank() {
   await topUp();
-  R.ensureCurrent(s, pool());
+  R.next(s, newGames());
   save();
-  const p = R.pair(s);
-  const { comparisons, rematches, agreed } = s.stats;
-  const stats = `<p class="muted">${s.ranked.length} ranked · ${comparisons} comparisons${rematches
-    ? ` · rematches agree ${Math.round(100 * agreed / rematches)}% (${rematches})` : ''}</p>`;
+  const c = s.current;
+  const stats = `<p class="muted">${s.ranked.length} ranked · ${s.stats.comparisons} comparisons${
+    s.ranked.length ? ` · list confidence ${Math.round(100 * R.listConfidence(s))}%` : ''}</p>`;
   const search = searchBox('Played something not shown? Search IGDB');
   const thisYear = new Date().getFullYear();
   const ofYear = s.year != null && s.ranked.filter(id => game(id)?.year === s.year).length;
@@ -231,29 +245,25 @@ async function rank() {
       <option value="">All years</option>${Array.from({ length: thisYear - 1970 }, (_, i) => thisYear - i)
         .map(y => `<option ${s.year === y ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
       ${s.year != null ? `<a href="#list" data-act="year-list">Your ${s.year} list (${ofYear})</a>` : ''}</div>`;
-  if (!p) return `${mode}<h1>No games left</h1><p>Every ${s.year ? `${s.year} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
-  const c = s.current;
-  await platformNames(p.flatMap(id => game(id).platforms));
-  const skippable = id => id === c.candidate || c.opponent != null;
-  const plats = [...new Set(p.flatMap(id => game(id).platforms))].filter(pl => !s.hiddenPlatforms.includes(pl))
+  if (!c) return `${mode}<h1>No games left</h1><p>Every ${s.year ? `${s.year} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
+  const f = c.isNew ? c.game : game(c.featured), ref = c.reference != null ? game(c.reference) : null;
+  const both = [f, ref].filter(Boolean);
+  await platformNames(both.flatMap(g => g.platforms));
+  const plats = [...new Set(both.flatMap(g => g.platforms))].filter(pl => !s.hiddenPlatforms.includes(pl))
     .map(pl => `<button data-act="hide-platform" data-id="${pl}">${esc(cat.platNames[pl] ?? `Platform ${pl}`)}</button>`).join('');
-  const card = (id, key) => {
-    const g = game(id);
-    return `<div class="side">
-      <button class="card" data-act="choose" data-id="${id}" title="Pick (${key})">${cover(g, 't_cover_big')}<span>${label(g)}</span></button>
-      ${skippable(id) ? `<div class="skip">Not played:
-        <button data-act="backlog" data-id="${id}">Want to play</button>
-        <button data-act="ignored" data-id="${id}">Not interested</button></div>`
-        : '<div class="skip muted">In your list</div>'}
-    </div>`;
-  };
-  const left = c.rematch ? `Both are in your list. ${esc(game(c.rematch[0]).name)} is ranked higher; pick the other to move it up.`
-    : c.opponent == null && `Placing ${esc(game(c.candidate).name)}: about ${Math.ceil(Math.log2(c.hi - c.lo + 1))} more`;
-  return `${mode}<h1>${c.rematch ? 'Rematch: which is better now?' : 'Which is better?'}</h1>${left ? `<p class="muted">${left}</p>` : ''}
-    <div class="pair">${card(p[0], '←')}${card(p[1], '→')}</div>
-    <div class="controls">
-      <button data-act="tie">Too close to call</button>
-      <button data-act="undo" ${s.history.length ? '' : 'disabled'}>Undo</button>
+  // No ranks or hints about the current order: just the comparison.
+  return `${mode}
+    <div class="duel">
+      <div class="featured" title="Swipe or use the arrow keys">${cover(f, 't_cover_big')}<div class="title">${label(f)}</div></div>
+      ${ref ? `<p class="ask">Better or worse than</p>
+        <div class="vs">${cover(ref, 't_thumb')}<span>${label(ref)}</span></div>`
+        : '<p class="ask">Have you played this?</p>'}
+      <div class="answers">${ref
+        ? '<button data-act="worse">← Worse</button><button data-act="better" class="primary">Better →</button>'
+        : '<button data-act="played" class="primary">Played it →</button>'}</div>
+      ${c.isNew ? `<div class="answers secondary"><button data-act="havent">↓ Haven't played</button>
+        <button data-act="want">↑ Want to play</button></div>` : ''}
+      <div class="controls"><button data-act="undo" ${s.history.length ? '' : 'disabled'}>Undo</button></div>
     </div>
     ${plats && `<details class="hide-plat"><summary>Never had one of these platforms?</summary>
       <p class="muted">Hide a platform and games only on it stop coming up.</p><div class="skip">${plats}</div></details>`}
@@ -276,7 +286,7 @@ async function searchGames(term) {
     save();
     results.innerHTML = ids.length ? ids.map(id => {
       const at = s.ranked.indexOf(id);
-      return row(id, at >= 0 ? `<span class="muted">#${at + 1}</span>` : `<button data-act="rerank" data-id="${id}">Rank it</button>`);
+      return row(id, at >= 0 ? '<span class="muted">In your list</span>' : `<button data-act="recheck" data-id="${id}">Rank it</button>`);
     }).join('') : '<li class="muted">No matches</li>';
   } catch (err) {
     results.innerHTML = `<li class="muted">Search failed: ${esc(err.message)}</li>`;
@@ -331,9 +341,9 @@ async function list() {
       ${select('series', [['', 'Any series'], ...byCount(games.flatMap(g => g.series ?? [])).map(x => [x, x])])}
     </div>
     ${l.length ? `<ol class="rows">${l.map(({ g, rank }, i) => row(g.id, `
-      <button data-act="rerank" data-id="${g.id}">Re-rank</button>
+      <button data-act="recheck" data-id="${g.id}">Recheck</button>
       <button data-act="backlog" data-id="${g.id}">Backlog</button>
-      <button data-act="ignored" data-id="${g.id}">Ignore</button>`, i + 1, narrowed && rank)).join('')}</ol>
+      <button data-act="ignored" data-id="${g.id}">Not played</button>`, i + 1, narrowed && rank)).join('')}</ol>
     <div class="list-foot">
       <button class="primary" data-act="share">Share ${narrowed ? 'this list' : 'my list'}</button>
       <button data-act="copy">Copy as text</button>
@@ -342,19 +352,21 @@ async function list() {
 
 const row = (id, actions, num, overall) => {
   const g = game(id);
-  return `<li>${num ? `<span class="num muted">${num}.</span>` : ''}<span class="thumb">${cover(g, 't_thumb')}</span><span class="name">${label(g)}${overall ? ` <span class="muted">· #${overall} overall</span>` : ''}</span><span class="acts">${actions}</span></li>`;
+  const conf = num && s.ratings[id] ? Math.round(100 * R.confidence(s, id)) : null;
+  return `<li>${num ? `<span class="num muted">${num}.</span>` : ''}<span class="thumb">${cover(g, 't_thumb')}</span><span class="name">${label(g)}${overall ? ` <span class="muted">· #${overall} overall</span>` : ''}${
+    conf != null ? `<span class="conf" style="--c:${conf}%" title="Confidence ${conf}%"></span>` : ''}</span><span class="acts">${actions}</span></li>`;
 };
 
 function backlog() {
   if (!s.backlog.length) return `<h1>Backlog</h1><p class="muted">Games you mark "Want to play" appear here.</p>`;
   return `<h1>Backlog</h1><ul class="rows">${s.backlog.map(id => row(id, `
-    <button data-act="rerank" data-id="${id}">Played it</button>
-    <button data-act="ignored" data-id="${id}">Ignore</button>`)).join('')}</ul>`;
+    <button data-act="recheck" data-id="${id}">Played it</button>
+    <button data-act="ignored" data-id="${id}">Not played</button>`)).join('')}</ul>`;
 }
 
 function ignored() {
-  if (!s.ignored.length) return `<h1>Ignored</h1><p class="muted">Games you mark "Not interested" appear here.</p>`;
-  return `<h1>Ignored</h1><ul class="rows">${s.ignored.map(id => row(id, `
+  if (!s.ignored.length) return `<h1>Not played</h1><p class="muted">Games you mark "Haven't played" appear here.</p>`;
+  return `<h1>Not played</h1><ul class="rows">${s.ignored.map(id => row(id, `
     <button data-act="restore" data-id="${id}">Restore</button>`)).join('')}</ul>`;
 }
 
@@ -391,14 +403,7 @@ async function settings() {
 
 const screens = { rank, list, backlog, ignored, settings };
 
-let returnTo = null; // { id, hash }: go back here once this game is placed
-
 async function render() {
-  if (returnTo && s.lastPlaced?.id === returnTo.id) {
-    const { hash } = returnTo;
-    returnTo = null;
-    if (location.hash !== hash) return void (location.hash = hash); // hashchange renders
-  } else if (returnTo && s.current?.candidate !== returnTo.id) returnTo = null;
   const n = render.n = (render.n ?? 0) + 1; // drop results of renders that were overtaken
   let route = location.hash.slice(1) || 'rank';
   if (!screens[route]) route = 'rank';
@@ -413,34 +418,31 @@ async function render() {
   }
   if (n !== render.n) return;
   view.innerHTML = html;
-  if (s.lastPlaced) {
-    const { id, rank, moved } = s.lastPlaced;
-    const year = game(id).year;
-    const inYear = s.year != null && year === s.year && s.ranked.filter(x => game(x)?.year === year).indexOf(id) + 1;
-    toast(`${moved ? 'Moved' : 'Placed'} ${game(id).name} ${moved ? 'up to' : 'at'} ${inYear ? `#${inYear} of ${year} (#${rank} overall)` : `#${rank}`}`);
-    s.lastPlaced = null;
-    save();
-  }
 }
 
 function act(action, id) {
   switch (action) {
-    case 'choose': R.choose(s, id, pool()); break;
-    case 'tie': R.tie(s, pool()); break;
+    case 'better': case 'worse': R.answer(s, action === 'better', newGames()); break;
+    case 'played': R.playedIt(s, newGames()); break;
+    case 'havent': case 'want': {
+      const name = s.current.game.name;
+      R.move(s, s.current.featured, action === 'want' ? 'backlog' : 'ignored', newGames());
+      toast(action === 'want' ? `${name} added to your backlog` : `${name} moved to Not played`);
+      break;
+    }
     case 'undo': R.undo(s); break;
-    case 'backlog': case 'ignored': R.move(s, id, action, pool()); break;
-    case 'restore': R.restore(s, id, pool()); break;
+    case 'backlog': case 'ignored': R.move(s, id, action, newGames()); break;
+    case 'restore': R.restore(s, id, newGames()); break;
     case 'hide-platform':
-      R.hidePlatform(s, id, pool());
+      R.hidePlatform(s, id, newGames());
       toast(`Hidden ${cat.platNames[id] ?? 'platform'}. Undo or Settings brings it back.`);
       break;
     case 'show-platform': R.showPlatform(s, id); break;
     case 'year-list':
       Object.assign(filters, { top: 'all', platform: '', series: '', year: String(s.year) });
       return; // the link navigates
-    case 'rerank':
-      R.reRank(s, id, pool());
-      if (location.hash && location.hash !== '#rank') returnTo = { id, hash: location.hash };
+    case 'recheck':
+      R.recheck(s, game(id), newGames());
       save();
       location.hash = '#rank';
       break;
@@ -482,7 +484,7 @@ view.addEventListener('click', e => {
 view.addEventListener('change', e => {
   if (e.target.hasAttribute('data-mode')) {
     s.year = e.target.value ? Number(e.target.value) : null;
-    s.current = null; // the game being placed may not be from this year; it goes back in the pool
+    s.current = null; // the shown game may not be from this year; it comes up again later
     save();
     render();
   }
@@ -508,17 +510,45 @@ view.addEventListener('submit', e => {
   if (e.target.id === 'search') searchGames(e.target.q.value);
 });
 
+// Arrow keys and swipes on the featured game map to the answer buttons on screen.
+const shortcut = { ArrowRight: ['better', 'played'], ArrowLeft: ['worse'], ArrowUp: ['want'], ArrowDown: ['havent'], u: ['undo'] };
+const onScreen = names => names.find(a => view.querySelector(`[data-act="${a}"]:not(:disabled)`));
+
 document.addEventListener('keydown', e => {
   if ((location.hash || '#rank') !== '#rank' || e.target.closest?.('input, select, textarea')) return;
-  const p = R.pair(s);
-  if (!p) return;
-  if (e.key === 'ArrowLeft') act('choose', p[0]);
-  else if (e.key === 'ArrowRight') act('choose', p[1]);
-  else if (e.key === 'u') act('undo');
-  else if (e.key === 't') act('tie');
-  else if (e.key === 'b' && s.current.candidate != null) act('backlog', s.current.candidate);
-  else if (e.key === 'i' && s.current.candidate != null) act('ignored', s.current.candidate);
+  const a = shortcut[e.key] && onScreen(shortcut[e.key]);
+  if (a) { e.preventDefault(); act(a); }
 });
+
+let drag = null;
+const swipe = (dx, dy) => Math.max(Math.abs(dx), Math.abs(dy)) < 80 ? null
+  : Math.abs(dx) > Math.abs(dy) ? onScreen(dx > 0 ? ['better', 'played'] : ['worse']) : onScreen([dy < 0 ? 'want' : 'havent']);
+const swipeLabel = { better: 'Better', played: 'Played it', worse: 'Worse', want: 'Want to play', havent: "Haven't played" };
+view.addEventListener('pointerdown', e => {
+  const el = e.target.closest('.featured');
+  if (!el) return;
+  drag = { el, x: e.clientX, y: e.clientY };
+  el.setPointerCapture(e.pointerId);
+});
+view.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag.el.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
+  drag.el.dataset.hint = swipeLabel[swipe(dx, dy)] ?? '';
+});
+const endDrag = e => {
+  if (!drag) return;
+  const { el, x, y } = drag, a = e.type === 'pointerup' && swipe(e.clientX - x, e.clientY - y);
+  drag = null;
+  el.dataset.hint = '';
+  if (!a) { el.style.transform = ''; return; }
+  el.style.transition = 'transform .15s, opacity .15s';
+  el.style.transform += ' scale(.9)';
+  el.style.opacity = 0;
+  setTimeout(() => act(a), 150);
+};
+view.addEventListener('pointerup', endDrag);
+view.addEventListener('pointercancel', endDrag);
 
 addEventListener('hashchange', render);
 document.addEventListener('visibilitychange', () => {
@@ -529,7 +559,9 @@ document.addEventListener('visibilitychange', () => {
 // Saved or imported state may predate newer fields.
 function withDefaults(saved) {
   const f = R.fresh();
-  return Object.assign(f, saved, { stats: { ...f.stats, ...saved?.stats }, seen: saved?.seen ?? {}, history: saved?.history ?? [] });
+  const st = Object.assign(f, saved, { stats: { ...f.stats, ...saved?.stats }, history: saved?.history ?? [] });
+  R.migrate(st, id => game(id)?.year);
+  return st;
 }
 
 s = withDefaults(readJSON(KEY));
