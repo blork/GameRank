@@ -216,6 +216,43 @@ const topUp = shared(async () => {
   save();
 });
 
+// Every platform with at least one of IGDB's 5000 most-rated games: how many it has, and its type.
+// Fetched once in the background; until then the picker offers the platforms of games already loaded.
+const platformStats = shared(async () => {
+  if (cat.platStats) return;
+  const counts = {}, types = {};
+  for (let offset = 0; offset < 5000; offset += 500) {
+    const page = await query('games', `fields platforms; where total_rating_count > 5 & platforms != null & ${TYPES};
+      sort total_rating_count desc; limit 500; offset ${offset};`);
+    for (const g of page) for (const p of g.platforms) counts[p] = (counts[p] ?? 0) + 1;
+  }
+  for (const p of await query('platforms', `fields name,platform_type; where id = (${Object.keys(counts)}); limit 500;`)) {
+    if (p.name.startsWith('DUPLICATE')) delete counts[p.id];
+    else { cat.platNames[p.id] = p.name; types[p.id] = p.platform_type; }
+  }
+  cat.platStats = { counts, types };
+  save();
+});
+
+// IGDB platform_type: 1 console, 5 portable, 4 operating system, 6 computer, 2 arcade, 3 other.
+const PLATFORM_GROUPS = [['Consoles', [1]], ['Handhelds', [5]], ['PC and mobile', [4]], ['Computers', [6]], ['Other', [2, 3, null]]];
+
+function platformOptions(selected) {
+  const option = p => `<option value="${p}" ${selected === p ? 'selected' : ''}>${esc(cat.platNames[p] ?? `Platform ${p}`)}</option>`;
+  const stats = cat.platStats;
+  const loaded = byCount([...s.ranked.map(game), ...newGames()].flatMap(g => g?.platforms ?? [])).map(Number);
+  const counts = stats?.counts ?? Object.fromEntries(loaded.map((p, i) => [p, loaded.length - i]));
+  const all = Object.keys(counts).map(Number).filter(p => !s.hiddenPlatforms.includes(p))
+    .sort((a, b) => counts[b] - counts[a]);
+  if (selected != null && !all.includes(selected)) all.push(selected);
+  if (!stats) return all.map(option).join('');
+  const group = (label, list) => list.length ? `<optgroup label="${label}">${list.map(option).join('')}</optgroup>` : '';
+  // Mac, Linux and mobile carry many PC ports, which inflates their counts: keep them out of the top.
+  const common = all.filter(p => p === 6 || [1, 5].includes(stats.types[p])).slice(0, 8);
+  return group('Most common', common) + PLATFORM_GROUPS.map(([label, types]) =>
+    group(label, all.filter(p => types.includes(stats.types[p] ?? null)))).join('');
+}
+
 async function platformNames(ids) {
   const missing = ids.filter(p => !cat.platNames[p]);
   if (!missing.length) return;
@@ -249,11 +286,9 @@ async function rank() {
     s.ranked.length ? ` · list confidence ${Math.round(100 * R.listConfidence(s))}%` : ''}</p>`;
   const search = searchBox('Played something not shown? Search IGDB');
   const thisYear = new Date().getFullYear();
-  // Platforms to offer: those of your ranked games and the games on offer, most common first.
-  const plat = byCount([...s.ranked.map(game), ...newGames()].flatMap(g => g?.platforms ?? [])).map(Number)
-    .filter(p => !s.hiddenPlatforms.includes(p)).slice(0, 25);
-  if (s.platform != null && !plat.includes(s.platform)) plat.unshift(s.platform);
-  await platformNames(plat);
+  if (!cat.platStats) platformStats().then(() => (location.hash.slice(1) || 'rank') === 'rank' && render(), () => {});
+  else if (s.platform != null) await platformNames([s.platform]);
+  if (!cat.platStats) await platformNames(byCount([...s.ranked.map(game), ...newGames()].flatMap(g => g?.platforms ?? [])).map(Number));
   const platName = p => cat.platNames[p] ?? `Platform ${p}`;
   const focusName = [s.year, s.platform != null && platName(s.platform)].filter(Boolean).join(' ');
   const focusCount = focusName && s.ranked.filter(id => (s.year == null || game(id)?.year === s.year) &&
@@ -261,8 +296,7 @@ async function rank() {
   const mode = `<div class="mode"><label>Games from <select data-mode="year" aria-label="Games from">
       <option value="">All years</option>${Array.from({ length: thisYear - 1970 }, (_, i) => thisYear - i)
         .map(y => `<option ${s.year === y ? 'selected' : ''}>${y}</option>`).join('')}</select></label>
-      <label>on <select data-mode="platform" aria-label="Games on"><option value="">All platforms</option>${plat
-        .map(p => `<option value="${p}" ${s.platform === p ? 'selected' : ''}>${esc(platName(p))}</option>`).join('')}</select></label>
+      <label>on <select data-mode="platform" aria-label="Games on"><option value="">All platforms</option>${platformOptions(s.platform)}</select></label>
       ${focusName ? `<a href="#list" data-act="focus-list">Your ${esc(focusName)} list (${focusCount})</a>` : ''}</div>`;
   if (!c) return `${mode}<h1>No games left</h1><p>Every ${focusName ? `${esc(focusName)} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
   const f = c.isNew ? c.game : game(c.featured), ref = c.reference != null ? game(c.reference) : null;
