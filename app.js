@@ -2,8 +2,8 @@ import * as R from './rank.js';
 
 const API = 'https://gamerank.crimson-wave-94ca.workers.dev';
 const KEY = 'gamerank:v2';
-const CAT = 'gamerank:catalogue:v3'; // disposable cache of game details and the candidate pools
-const FIELDS = 'fields name,first_release_date,cover.image_id,platforms,total_rating_count,franchises.name,collections.name,aggregated_rating,total_rating;';
+const CAT = 'gamerank:catalogue:v4'; // disposable cache of game details and the candidate pools
+const FIELDS = 'fields name,first_release_date,cover.image_id,platforms,total_rating_count,franchises.name,collections.name,aggregated_rating,total_rating,game_type,parent_game;';
 const TYPES = 'game_type = (0,4,8,9,10)'; // main, standalone expansion, remake, remaster, expanded
 const POOL_MIN = 50;
 const SEED_TARGET = 50; // matches rank.js: new players start on acclaimed games
@@ -149,14 +149,17 @@ function addGames(list) {
       cover: g.cover?.image_id ?? null, platforms: g.platforms ?? [], pop: g.total_rating_count ?? 0,
       series: [...new Set([...g.franchises ?? [], ...g.collections ?? []].map(x => x.name))],
       critic: g.aggregated_rating ?? g.total_rating ?? null, // starting rating
+      // remakes, remasters and expanded editions share their original's family (merge suggestions)
+      family: [8, 9, 10].includes(g.game_type) && g.parent_game ? g.parent_game : g.id,
     };
   }
   return list.map(g => g.id);
 }
 
 const game = id => cat.games[id];
-const userIds = () => [...s.ranked, ...s.backlog, ...s.ignored,
-  ...(s.current ? [s.current.featured, s.current.reference] : [])].filter(id => id != null);
+const userIds = () => [...s.ranked, ...s.backlog, ...s.ignored, ...Object.keys(s.merged ?? {}).map(Number),
+  ...[s.current?.featured, s.current?.reference, s.upcoming?.featured]].filter(id => id != null);
+const mergedInto = id => Object.keys(s.merged).map(Number).filter(c => s.merged[c] === id);
 
 // Where new games come from: that year's games in year mode; otherwise the critics' top
 // 1000 for a new player, then those and the most-rated games, alternately.
@@ -300,6 +303,8 @@ async function rank() {
       ${focusName ? `<a href="#list" data-act="focus-list">Your ${esc(focusName)} list (${focusCount})</a>` : ''}</div>`;
   if (!c) return `${mode}<h1>No games left</h1><p>Every ${focusName ? `${esc(focusName)} ` : ''}game not on a hidden platform is ranked, backlogged or ignored.</p>${stats}${search}`;
   const f = c.isNew ? c.game : game(c.featured), ref = c.reference != null ? game(c.reference) : null;
+  const up = s.upcoming && (s.upcoming.isNew ? s.upcoming.game : game(s.upcoming.featured));
+  const same = c.isNew && s.ranked.find(id => game(id)?.family === f.family);
   const both = [f, ref].filter(Boolean);
   await platformNames(both.flatMap(g => g.platforms));
   const plats = [...new Set(both.flatMap(g => g.platforms))].filter(pl => !s.hiddenPlatforms.includes(pl))
@@ -307,7 +312,12 @@ async function rank() {
   // No ranks or hints about the current order: just the comparison.
   return `${mode}
     <div class="duel">
-      <div class="featured" title="Swipe or use the arrow keys">${cover(f, 't_cover_big')}<div class="title">${label(f)}</div></div>
+      <div class="deck">
+        ${up ? `<div class="back" aria-hidden="true">${cover(up, 't_cover_big')}<div class="title">${label(up)}</div></div>` : ''}
+        <div class="featured" title="Swipe or use the arrow keys">${cover(f, 't_cover_big')}<div class="title">${label(f)}</div></div>
+      </div>
+      ${same ? `<p class="same">A version of <b>${esc(game(same).name)}</b>, which is in your list.
+        <button data-act="merge-new" data-id="${same}">Count as the same game</button></p>` : ''}
       ${ref ? `<p class="ask">Better or worse than</p>
         <div class="vs">${cover(ref, 't_thumb')}<span>${label(ref)}</span></div>`
         : '<p class="ask">Have you played this?</p>'}
@@ -339,7 +349,9 @@ async function searchGames(term) {
     save();
     results.innerHTML = ids.length ? ids.map(id => {
       const at = s.ranked.indexOf(id);
-      return row(id, at >= 0 ? '<span class="muted">In your list</span>' : `<button data-act="recheck" data-id="${id}">Rank it</button>`);
+      return row(id, at >= 0 ? '<span class="muted">In your list</span>'
+        : s.merged[id] ? `<span class="muted">Counted as ${esc(game(s.merged[id])?.name)}</span>`
+        : `<button data-act="recheck" data-id="${id}">Rank it</button>`);
     }).join('') : '<li class="muted">No matches</li>';
   } catch (err) {
     results.innerHTML = `<li class="muted">Search failed: ${esc(err.message)}</li>`;
@@ -394,7 +406,8 @@ async function list() {
       ${select('series', [['', 'Any series'], ...byCount(games.flatMap(g => g.series ?? [])).map(x => [x, x])])}
     </div>
     ${l.length ? `<ol class="rows">${l.map(({ g, rank }, i) => row(g.id, `
-      <button data-act="recheck" data-id="${g.id}">Recheck</button>
+      ${merging === g.id ? mergePicker(g.id) : `<button data-act="recheck" data-id="${g.id}">Recheck</button>
+      <button data-act="merge-pick" data-id="${g.id}">Merge</button>`}
       <button data-act="backlog" data-id="${g.id}">Backlog</button>
       <button data-act="ignored" data-id="${g.id}">Not played</button>`, i + 1, narrowed && rank)).join('')}</ol>
     <div class="list-foot">
@@ -403,10 +416,25 @@ async function list() {
     </div>` : '<p class="muted">No games match these filters.</p>'}`;
 }
 
+// Merge picker for a My list row: games likely to be the same (same family or series) first.
+let merging = null;
+function mergePicker(id) {
+  const g = game(id), others = s.ranked.filter(x => x !== id).map(game);
+  const likely = others.filter(o => o.family === g.family || o.series?.some(x => g.series?.includes(x)));
+  const option = o => `<option value="${o.id}">${esc(o.name)}${o.year ? ` (${o.year})` : ''}</option>`;
+  return `<select data-merge="${id}" aria-label="Merge into"><option value="">Merge into…</option>
+    ${likely.length ? `<optgroup label="Likely the same game">${likely.map(option).join('')}</optgroup>` : ''}
+    <optgroup label="Everything else">${others.filter(o => !likely.includes(o)).sort((a, b) => a.name.localeCompare(b.name)).map(option).join('')}</optgroup>
+  </select><button data-act="merge-cancel">Cancel</button>`;
+}
+
 const row = (id, actions, num, overall) => {
   const g = game(id);
   const conf = num && s.ratings[id] ? Math.round(100 * R.confidence(s, id)) : null;
+  const includes = num ? mergedInto(id).map(game).filter(Boolean) : [];
   return `<li>${num ? `<span class="num muted">${num}.</span>` : ''}<span class="thumb">${cover(g, 't_thumb')}</span><span class="name">${label(g)}${overall ? ` <span class="muted">· #${overall} overall</span>` : ''}${
+    includes.length ? `<span class="includes muted">Includes ${includes.map(x => esc(x.name)).join(', ')}
+      <button data-act="separate" data-id="${id}">Separate</button></span>` : ''}${
     conf != null ? `<span class="conf" style="--c:${conf}%" title="Confidence ${conf}%"></span>` : ''}</span><span class="acts">${actions}</span></li>`;
 };
 
@@ -495,6 +523,15 @@ function act(action, id) {
       Object.assign(filters, { top: 'all', series: '', year: s.year == null ? '' : String(s.year),
                                platform: s.platform == null ? '' : String(s.platform) });
       return; // the link navigates
+    case 'merge-new': {
+      const name = s.current.game.name;
+      R.merge(s, s.current.featured, id, newGames());
+      toast(`${name} now counts as ${game(id).name}`);
+      break;
+    }
+    case 'merge-pick': merging = id; break;
+    case 'merge-cancel': merging = null; break;
+    case 'separate': R.separate(s, id); toast('Separated: those games can come up again'); break;
     case 'recheck':
       R.recheck(s, game(id), newGames());
       save();
@@ -538,7 +575,15 @@ view.addEventListener('click', e => {
 view.addEventListener('change', e => {
   if (e.target.dataset.mode) {
     s[e.target.dataset.mode] = e.target.value ? Number(e.target.value) : null; // year or platform
-    s.current = null; // the shown game may not match; it comes up again later
+    s.current = s.upcoming = null; // the shown games may not match; they come up again later
+    save();
+    render();
+  }
+  if (e.target.dataset.merge && e.target.value) {
+    const id = Number(e.target.dataset.merge), into = Number(e.target.value);
+    R.merge(s, id, into, newGames());
+    merging = null;
+    toast(`${game(id).name} now counts as ${game(into).name}`);
     save();
     render();
   }
@@ -575,6 +620,14 @@ document.addEventListener('keydown', e => {
 });
 
 let drag = null;
+// The card behind the top one moves into place as the top one is dragged away (p: 0 to 1).
+function raiseBack(p, animate = false) {
+  const back = view.querySelector('.back');
+  if (!back) return;
+  back.style.transition = animate ? 'transform .15s, filter .15s' : 'none';
+  back.style.transform = p == null ? '' : `translateY(${28 * (1 - p)}px) scale(${0.94 + 0.06 * p})`;
+  back.style.filter = p == null ? '' : `brightness(${0.55 + 0.45 * p})`;
+}
 const swipe = (dx, dy) => Math.max(Math.abs(dx), Math.abs(dy)) < 80 ? null
   : Math.abs(dx) > Math.abs(dy) ? onScreen(dx > 0 ? ['better', 'played'] : ['worse']) : onScreen([dy < 0 ? 'want' : 'havent']);
 const swipeLabel = { better: 'Better', played: 'Played it', worse: 'Worse', want: 'Want to play', havent: "Haven't played" };
@@ -593,6 +646,7 @@ view.addEventListener('pointermove', e => {
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   drag.el.style.transform = `translate(${dx}px, ${dy}px) rotate(${dx / 25}deg)`;
   drag.el.dataset.hint = swipeLabel[swipe(dx, dy)] ?? '';
+  raiseBack(Math.min(1, Math.hypot(dx, dy) / 120));
 });
 const endDrag = e => {
   if (!drag) return;
@@ -603,8 +657,10 @@ const endDrag = e => {
   if (!a) { // not far enough: spring back
     el.style.transition = 'transform .2s';
     el.style.transform = '';
+    raiseBack(null, true);
     return;
   }
+  raiseBack(1, true);
   el.style.transition = 'transform .15s, opacity .15s';
   el.style.transform += ' scale(.9)';
   el.style.opacity = 0;

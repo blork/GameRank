@@ -16,7 +16,7 @@ const Q = Math.LN10 / 400;
 
 export function fresh() {
   return { version: 2, year: null, platform: null, hiddenPlatforms: [], ranked: [], backlog: [], ignored: [],
-           ratings: {}, recent: [], current: null, history: [], stats: { comparisons: 0 } };
+           ratings: {}, merged: {}, recent: [], current: null, upcoming: null, history: [], stats: { comparisons: 0 } };
 }
 
 // Starting rating from the critic score (0-100), so a new list looks sensible early.
@@ -49,9 +49,9 @@ function add(s, g) {
 // Undo restores the lists and the ratings of the games an action touched (a full copy
 // of every rating per step would fill localStorage).
 function snapshot(s, ids = []) {
-  const { ranked, backlog, ignored, hiddenPlatforms, current, recent, stats, year } = s;
+  const { ranked, backlog, ignored, hiddenPlatforms, merged, current, upcoming, recent, stats, year, platform } = s;
   s.history = [...s.history, {
-    lists: structuredClone({ ranked, backlog, ignored, hiddenPlatforms, current, recent, stats, year }),
+    lists: structuredClone({ ranked, backlog, ignored, hiddenPlatforms, merged, current, upcoming, recent, stats, year, platform }),
     ratings: Object.fromEntries(ids.map(id => [id, s.ratings[id] ? structuredClone(s.ratings[id]) : null])),
   }].slice(-HISTORY);
 }
@@ -80,11 +80,15 @@ function focus(s) {
   return list.length >= FOCUS_MIN ? list : null;
 }
 
-function pickNew(s, games, rand) {
-  const used = new Set([...s.ranked, ...s.backlog, ...s.ignored]);
+// Games that can't be offered as new: already sorted somewhere, or merged into another game.
+const used = s => new Set([...s.ranked, ...s.backlog, ...s.ignored, ...Object.keys(s.merged).map(Number)]);
+
+function pickNew(s, games, rand, exclude) {
+  const taken = used(s);
+  taken.add(exclude);
   const pool = [];
   for (const g of games) {
-    if (used.has(g.id) || !eligible(s, g)) continue;
+    if (taken.has(g.id) || !eligible(s, g)) continue;
     pool.push(g);
     if (pool.length === POOL) break; // pools are sorted best-known first
   }
@@ -93,8 +97,8 @@ function pickNew(s, games, rand) {
 
 // The least certain games, skipping ones featured in the last few comparisons
 // (with a tiny list, only the last one).
-function pickRefine(s, rand) {
-  const all = focus(s) ?? s.ranked;
+function pickRefine(s, rand, exclude) {
+  const all = (focus(s) ?? s.ranked).filter(id => id !== exclude);
   let list = all.filter(id => !s.recent.includes(id));
   if (!list.length) list = all.filter(id => id !== s.recent[0]);
   const top = list.map(id => [id, rdNow(s, id)]).sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -114,22 +118,36 @@ function pickReference(s, id, r, rd, rand) {
   return sample(list, x => Math.exp(-((s.ratings[x].r - r) ** 2) / (2 * width ** 2)) / rdNow(s, x), rand);
 }
 
-// Choose the next comparison. `games` is the pool new games come from, best-known first.
-// s.current = { featured, reference, isNew, game? }; reference is null only before
-// anything is ranked, and game (the details) is kept for new games.
-export function next(s, games, rand = Math.random) {
-  if (s.current) return;
-  const newCard = () => {
-    const g = pickNew(s, games, rand);
-    return g && { featured: g.id, reference: pickReference(s, g.id, prior(g), RD0, rand), isNew: true, game: g };
-  };
-  const refineCard = () => {
-    const id = s.ranked.length >= 2 ? pickRefine(s, rand) : null;
-    return id != null && { featured: id, reference: pickReference(s, id, s.ratings[id].r, rdNow(s, id), rand), isNew: false };
+// Which game to feature next ({ featured, isNew, game? }), not counting `exclude`.
+function chooseFeatured(s, games, rand, exclude) {
+  const newOne = () => { const g = pickNew(s, games, rand, exclude); return g && { featured: g.id, isNew: true, game: g }; };
+  const refine = () => {
+    const id = s.ranked.length >= 2 ? pickRefine(s, rand, exclude) : null;
+    return id != null && { featured: id, isNew: false };
   };
   // In year/platform mode, offer only new matching games until enough of them are ranked.
   const wantNew = ((s.year != null || s.platform != null) && !focus(s)) || rand() < (s.ranked.length < SEED_TARGET ? 0.8 : 0.4);
-  s.current = (wantNew ? newCard() || refineCard() : refineCard() || newCard()) || null;
+  return (wantNew ? newOne() || refine() : refine() || newOne()) || null;
+}
+
+// The game queued behind the current one may have been ranked, moved or hidden since.
+const stillValid = (s, u) => u && (u.isNew ? !used(s).has(u.featured) && eligible(s, u.game) : s.ranked.includes(u.featured));
+
+// Choose the next comparison. `games` is the pool new games come from, best-known first.
+// s.current = { featured, reference, isNew, game? }: reference is null only before anything
+// is ranked, and game (the details) is kept for new games. s.upcoming is the game queued
+// next (shown behind the current card); its reference is chosen when it comes up.
+export function next(s, games, rand = Math.random) {
+  if (!s.current) {
+    const f = stillValid(s, s.upcoming) ? s.upcoming : chooseFeatured(s, games, rand);
+    s.upcoming = null;
+    if (!f) { s.current = null; return; }
+    const r = f.isNew ? prior(f.game) : s.ratings[f.featured].r, rd = f.isNew ? RD0 : rdNow(s, f.featured);
+    s.current = { ...f, reference: pickReference(s, f.featured, r, rd, rand) };
+  }
+  if (!stillValid(s, s.upcoming) || s.upcoming.featured === s.current.featured) {
+    s.upcoming = chooseFeatured(s, games, rand, s.current.featured);
+  }
 }
 
 const g = rd => 1 / Math.sqrt(1 + 3 * Q * Q * rd * rd / (Math.PI * Math.PI));
@@ -185,6 +203,32 @@ export function move(s, id, list, games, rand = Math.random) {
   next(s, games, rand);
 }
 
+// Treat `id` as the same game as `into` (a re-release): it stops coming up, and if both were
+// ranked their ratings combine, weighted by how certain each was.
+export function merge(s, id, into, games, rand = Math.random) {
+  if (id === into) return;
+  snapshot(s, [id, into]);
+  const a = s.ratings[id], b = s.ratings[into];
+  if (a && b) {
+    const wa = 1 / rdNow(s, id) ** 2, wb = 1 / rdNow(s, into) ** 2;
+    Object.assign(b, { r: (a.r * wa + b.r * wb) / (wa + wb), rd: Math.max(RD_MIN, 1 / Math.sqrt(wa + wb)), last: s.stats.comparisons });
+  }
+  for (const [child, parent] of Object.entries(s.merged)) if (parent === id) s.merged[child] = into;
+  s.merged[id] = into;
+  for (const k of ['ranked', 'backlog', 'ignored']) s[k] = s[k].filter(x => x !== id);
+  delete s.ratings[id];
+  sortRanked(s);
+  const c = s.current;
+  if (c && (c.featured === id || c.reference === id)) s.current = null;
+  next(s, games, rand);
+}
+
+// Undo every merge into `into`: those games can come up again as new games.
+export function separate(s, into) {
+  snapshot(s);
+  for (const [child, parent] of Object.entries(s.merged)) if (parent === into) delete s.merged[child];
+}
+
 // Look at a game again: unranked ones (search, backlog) are added at their starting
 // rating; ranked ones become uncertain. Either way it's featured next.
 export function recheck(s, game, games, rand = Math.random) {
@@ -195,6 +239,7 @@ export function recheck(s, game, games, rand = Math.random) {
   else s.ratings[game.id].rd = RD0;
   const reference = pickReference(s, game.id, s.ratings[game.id].r, RD0, rand);
   s.current = reference == null ? null : { featured: game.id, reference, isNew: false };
+  if (s.upcoming?.featured === game.id) s.upcoming = null;
   next(s, games, rand);
 }
 
@@ -223,7 +268,7 @@ export function showPlatform(s, platform) {
 
 export function setYear(s, year, games, rand = Math.random) {
   s.year = year;
-  s.current = null;
+  s.current = s.upcoming = null;
   next(s, games, rand);
 }
 
@@ -231,6 +276,7 @@ export function setYear(s, year, games, rand = Math.random) {
 // no ratings: spread them evenly, moderately certain. yearOf(id) gives the release year if known.
 export function migrate(s, yearOf) {
   if (s.current && !('featured' in s.current)) s.current = null; // old comparison format
+  s.merged ??= {};
   for (const k of ['seen', 'rematchDue', 'lastPlaced', 'platforms']) delete s[k];
   const n = s.ranked.length;
   s.ranked.forEach((id, i) => {

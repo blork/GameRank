@@ -127,14 +127,52 @@ const play = (s, gs, steps, better) => {
   play(s, gs, 400, c => c.featured < c.reference);
   // fewer than 5 ranked on platform 9: only new platform-9 games are offered
   s.platform = 9;
-  s.current = null;
+  s.current = s.upcoming = null; // as the app does on a mode change
   const nine = [{ id: 901, platforms: [9], year: 2000 }, { id: 902, platforms: [9], year: 2000 }];
   for (let k = 0; k < 20; k++) { s.current = null; R.next(s, nine, rand); assert.ok(s.current.isNew, 'offered a ranked game from another platform'); }
   s.platform = 7;
-  s.current = null;
+  s.current = s.upcoming = null;
   R.next(s, [], rand);
   const seen = play(s, gs, 100, c => c.featured < c.reference);
   assert.ok(seen.every(c => s.ratings[c.featured].platforms.includes(7)), 'featured from another platform');
 }
 
-console.log('ok: convergence, cooldown, seeding spread, undo, platforms, recheck, year mode, migration, platform mode');
+// 9. The queued game is shown next, never equals the current one, and skips games ranked meanwhile.
+{
+  const gs = games(40), s = R.fresh();
+  R.next(s, gs, rand);
+  play(s, gs, 60, c => c.featured < c.reference);
+  for (let k = 0; k < 50; k++) {
+    const queued = s.upcoming;
+    assert.ok(queued && queued.featured !== s.current.featured, 'queued game missing or same as current');
+    R.answer(s, k % 2 === 0, gs, rand);
+    assert.equal(s.current.featured, queued.featured, 'queued game did not come next');
+  }
+  const queued = s.upcoming.featured;
+  if (s.upcoming.isNew) {
+    R.move(s, queued, 'backlog', gs, rand); // e.g. moved from search results meanwhile
+    assert.notEqual(s.upcoming?.featured, queued);
+  }
+}
+
+// 10. Merging: a new re-release stops coming up; two ranked games combine; separate undoes it.
+{
+  const gs = games(30), s = R.fresh();
+  R.next(s, gs, rand);
+  play(s, gs, 200, c => c.featured < c.reference);
+  const [a, b] = [s.ranked[0], s.ranked[5]], ra = s.ratings[a].r, rb = s.ratings[b].r;
+  R.merge(s, b, a, gs, rand);
+  assert.ok(!s.ranked.includes(b) && !s.ratings[b] && s.merged[b] === a);
+  assert.ok(s.ratings[a].r <= Math.max(ra, rb) && s.ratings[a].r >= Math.min(ra, rb), 'combined rating between the two');
+  for (let k = 0; k < 200; k++) { s.current = s.upcoming = null; R.next(s, gs, rand); assert.notEqual(s.current.featured, b, 'merged game offered'); }
+  R.undo(s);
+  R.undo(s);
+  const fresh2 = R.fresh();
+  R.merge(fresh2, 7, 3, [], rand);
+  R.merge(fresh2, 3, 1, [], rand); // merging a merge target carries its merges along
+  assert.deepEqual(fresh2.merged, { 7: 1, 3: 1 });
+  R.separate(fresh2, 1);
+  assert.deepEqual(fresh2.merged, {});
+}
+
+console.log('ok: convergence, cooldown, seeding spread, undo, platforms, recheck, year mode, migration, platform mode, queue, merging');
