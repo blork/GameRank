@@ -265,8 +265,9 @@ async function platformNames(ids) {
 
 
 const esc = t => String(t ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
-const cover = (g, size) => g.cover
-  ? `<img src="https://images.igdb.com/igdb/image/upload/${size}/${g.cover}.jpg" alt="" loading="lazy">`
+// eager: the card deck, where a blank frame while a lazy image decodes shows as a hitch
+const cover = (g, size, eager) => g.cover
+  ? `<img src="https://images.igdb.com/igdb/image/upload/${size}/${g.cover}.jpg" alt="" ${eager ? 'decoding="sync"' : 'loading="lazy"'}>`
   : `<div class="nocover">${esc(g.name)}</div>`;
 const label = g => `${esc(g.name)}${g.year ? ` <span class="muted">(${g.year})</span>` : ''}`;
 
@@ -307,14 +308,15 @@ async function rank() {
   const same = c.isNew && s.ranked.find(id => game(id)?.family === f.family);
   const both = [f, ref].filter(Boolean);
   await platformNames(both.flatMap(g => g.platforms));
+  if (up) platformNames(up.platforms).catch(() => {}); // ready before it comes up, so the next swap doesn't wait
   const plats = [...new Set(both.flatMap(g => g.platforms))].filter(pl => !s.hiddenPlatforms.includes(pl))
     .map(pl => `<button data-act="hide-platform" data-id="${pl}">${esc(cat.platNames[pl] ?? `Platform ${pl}`)}</button>`).join('');
   // No ranks or hints about the current order: just the comparison.
   return `${mode}
     <div class="duel">
       <div class="deck">
-        ${up ? `<div class="back" aria-hidden="true">${cover(up, 't_cover_big')}<div class="title">${label(up)}</div></div>` : ''}
-        <div class="featured" title="Swipe or use the arrow keys">${cover(f, 't_cover_big')}<div class="title">${label(f)}</div></div>
+        ${up ? `<div class="back" aria-hidden="true">${cover(up, 't_cover_big', true)}<div class="title">${label(up)}</div></div>` : ''}
+        <div class="featured" title="Swipe or use the arrow keys">${cover(f, 't_cover_big', true)}<div class="title">${label(f)}</div></div>
       </div>
       ${same ? `<p class="same">A version of <b>${esc(game(same).name)}</b>, which is in your list.
         <button data-act="merge-new" data-id="${same}">Count as the same game</button></p>` : ''}
@@ -661,8 +663,10 @@ const endDrag = e => {
     return;
   }
   raiseBack(1, true);
-  el.style.transition = 'transform .15s, opacity .15s';
-  el.style.transform += ' scale(.9)';
+  // carry on in the swipe direction, off the deck
+  const dx = e.clientX - x, dy = e.clientY - y, k = 600 / Math.hypot(dx, dy);
+  el.style.transition = 'transform .15s ease-in, opacity .15s ease-in';
+  el.style.transform = `translate(${dx * k}px, ${dy * k}px) rotate(${dx / 8}deg)`;
   el.style.opacity = 0;
   setTimeout(() => act(a), 150);
 };
