@@ -321,7 +321,7 @@ async function rank() {
       ${same ? `<p class="same">A version of <b>${esc(game(same).name)}</b>, which is in your list.
         <button data-act="merge-new" data-id="${same}">Count as the same game</button></p>` : ''}
       ${ref ? `<p class="ask">Better or worse than</p>
-        <div class="vs">${cover(ref, 't_thumb')}<span>${label(ref)}</span></div>`
+        <div class="vs">${cover(ref, 't_thumb', true)}<span>${label(ref)}</span></div>`
         : '<p class="ask">Have you played this?</p>'}
       <div class="answers">${ref
         ? '<button data-act="worse">← Worse</button><button data-act="better" class="primary">Better →</button>'

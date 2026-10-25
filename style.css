@@ -30,8 +30,11 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .duel { max-width: 360px; margin: 0 auto; text-align: center; }
 .deck { display: grid; margin-bottom: 20px; }
 .deck > * { grid-area: 1 / 1; }
-.back { transform: translateY(28px) scale(.94); filter: brightness(.55); pointer-events: none; animation: deal .3s ease-out; }
-@keyframes deal { from { opacity: 0; transform: translateY(48px) scale(.9); } } /* new card joins the deck */
+.back, .deck::before { transform: translateY(28px) scale(.94); filter: brightness(.55); pointer-events: none; }
+.deck::before { content: ''; grid-area: 1 / 1; border-radius: 12px; background: var(--card); border: 1px solid var(--line); }
+/* new cards fade in where they sit, over the deck edge, instead of moving into place */
+.back, .vs { animation: fade-in .25s ease-out; }
+@keyframes fade-in { from { opacity: 0; } }
 .featured, .back { position: relative; touch-action: none; -webkit-user-select: none; user-select: none; cursor: grab; padding: 10px; border-radius: 12px;
             background: var(--card); border: 1px solid var(--line); }
 /* Fixed box for every cover, whatever the artwork's shape */
