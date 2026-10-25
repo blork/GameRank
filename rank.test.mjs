@@ -173,6 +173,21 @@ const play = (s, gs, steps, better) => {
   assert.deepEqual(fresh2.merged, { 7: 1, 3: 1 });
   R.separate(fresh2, 1);
   assert.deepEqual(fresh2.merged, {});
+
+  // Kept as the original release: Remastered (6036, ranked) + Part I (204350, new) -> The Last of Us (1009)
+  const t3 = R.fresh();
+  t3.ranked = [5, 6036, 6];
+  t3.ratings = { 5: { r: 1600, rd: 60, last: 0, vs: [] }, 6036: { r: 1550, rd: 60, last: 0, vs: [] }, 6: { r: 1500, rd: 60, last: 0, vs: [] } };
+  t3.ignored = [1009];
+  R.merge(t3, 204350, 6036, [], rand, { id: 1009, year: 2013, platforms: [9] });
+  assert.deepEqual(t3.ranked, [5, 1009, 6]);
+  assert.equal(t3.ratings[1009].r, 1550);
+  assert.equal(t3.ratings[1009].year, 2013);
+  assert.deepEqual(t3.merged, { 204350: 1009, 6036: 1009 });
+  assert.deepEqual(t3.ignored, [], 'original taken off Not played');
+  R.undo(t3);
+  assert.deepEqual(t3.ranked, [5, 6036, 6]);
+  assert.ok(!t3.ratings[1009] && t3.ratings[6036], 'one undo restores both steps');
 }
 
 console.log('ok: convergence, cooldown, seeding spread, undo, platforms, recheck, year mode, migration, platform mode, queue, merging');

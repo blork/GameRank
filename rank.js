@@ -203,11 +203,9 @@ export function move(s, id, list, games, rand = Math.random) {
   next(s, games, rand);
 }
 
-// Treat `id` as the same game as `into` (a re-release): it stops coming up, and if both were
-// ranked their ratings combine, weighted by how certain each was.
-export function merge(s, id, into, games, rand = Math.random) {
-  if (id === into) return;
-  snapshot(s, [id, into]);
+// Fold `id` into `into`: it stops coming up, and if both were ranked their ratings combine,
+// weighted by how certain each was.
+function fold(s, id, into) {
   const a = s.ratings[id], b = s.ratings[into];
   if (a && b) {
     const wa = 1 / rdNow(s, id) ** 2, wb = 1 / rdNow(s, into) ** 2;
@@ -217,9 +215,34 @@ export function merge(s, id, into, games, rand = Math.random) {
   s.merged[id] = into;
   for (const k of ['ranked', 'backlog', 'ignored']) s[k] = s[k].filter(x => x !== id);
   delete s.ratings[id];
+}
+
+// Show ranked entry `from` as game `to` instead (same rating), folding `from` into it.
+function rename(s, from, to) {
+  s.ratings[to.id] = { ...s.ratings[from], year: to.year ?? null, platforms: to.platforms ?? [] };
+  delete s.ratings[from];
+  s.ranked = s.ranked.map(x => (x === from ? to.id : x));
+  for (const k of ['backlog', 'ignored']) s[k] = s[k].filter(x => x !== to.id);
+  for (const [child, parent] of Object.entries(s.merged)) if (parent === from) s.merged[child] = to.id;
+  delete s.merged[to.id];
+  s.merged[from] = to.id;
+}
+
+// Treat `id` and `into` as the same game (re-releases). The merged entry is shown as `keep`
+// (the original release; defaults to `into`), even if that game wasn't ranked yet.
+export function merge(s, id, into, games, rand = Math.random, keep = null) {
+  if (id === into) return;
+  const k = keep?.id ?? into;
+  snapshot(s, [id, into, k]);
+  fold(s, id, into);
+  if (k !== into) {
+    if (s.ratings[k]) fold(s, into, k); // the original is ranked separately: fold into it
+    else rename(s, into, keep);
+  }
   sortRanked(s);
+  const gone = new Set([id, into].filter(x => x !== k));
   const c = s.current;
-  if (c && (c.featured === id || c.reference === id)) s.current = null;
+  if (c && (gone.has(c.featured) || gone.has(c.reference))) s.current = null;
   next(s, games, rand);
 }
 

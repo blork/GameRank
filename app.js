@@ -418,6 +418,23 @@ async function list() {
     </div>` : '<p class="muted">No games match these filters.</p>'}`;
 }
 
+// Merged entries are shown as the original release: the IGDB family's root (fetched if
+// needed), or for games IGDB doesn't link, the earlier one.
+async function mergeGames(id, into) {
+  const a = game(id), b = game(into);
+  let keep = (a.year ?? Infinity) < (b.year ?? Infinity) ? a : b;
+  try {
+    if (a.family === b.family) {
+      if (!game(a.family)) addGames(await query('games', `${FIELDS} where id = ${a.family};`));
+      keep = game(a.family) ?? keep;
+    }
+  } catch {} // offline: fall back to the earlier release
+  R.merge(s, id, into, newGames(), Math.random, keep);
+  toast(`${[a, b].filter(g => g !== keep).map(g => g.name).join(' and ')} now ${keep === a || keep === b ? 'counts' : 'count'} as ${keep.name}`);
+  save();
+  render();
+}
+
 // Merge picker for a My list row: games likely to be the same (same family or series) first.
 let merging = null;
 function mergePicker(id) {
@@ -525,12 +542,7 @@ function act(action, id) {
       Object.assign(filters, { top: 'all', series: '', year: s.year == null ? '' : String(s.year),
                                platform: s.platform == null ? '' : String(s.platform) });
       return; // the link navigates
-    case 'merge-new': {
-      const name = s.current.game.name;
-      R.merge(s, s.current.featured, id, newGames());
-      toast(`${name} now counts as ${game(id).name}`);
-      break;
-    }
+    case 'merge-new': mergeGames(s.current.featured, id); return;
     case 'merge-pick': merging = id; break;
     case 'merge-cancel': merging = null; break;
     case 'separate': R.separate(s, id); toast('Separated: those games can come up again'); break;
@@ -582,12 +594,8 @@ view.addEventListener('change', e => {
     render();
   }
   if (e.target.dataset.merge && e.target.value) {
-    const id = Number(e.target.dataset.merge), into = Number(e.target.value);
-    R.merge(s, id, into, newGames());
     merging = null;
-    toast(`${game(id).name} now counts as ${game(into).name}`);
-    save();
-    render();
+    mergeGames(Number(e.target.dataset.merge), Number(e.target.value));
   }
   if (e.target.dataset.filter) {
     filters[e.target.dataset.filter] = e.target.value;
