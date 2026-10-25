@@ -28,10 +28,11 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { color: var(--danger); border-color: var(--danger); }
 
 .duel { max-width: 360px; margin: 0 auto; text-align: center; }
-.featured { position: relative; touch-action: none; user-select: none; cursor: grab; padding: 10px; border-radius: 12px;
+.featured { position: relative; touch-action: none; -webkit-user-select: none; user-select: none; cursor: grab; padding: 10px; border-radius: 12px;
             background: var(--card); border: 1px solid var(--line); }
 .featured img, .featured .nocover { height: min(48vh, 440px); width: auto; max-width: 100%; aspect-ratio: 3 / 4;
-                                    object-fit: cover; border-radius: 8px; display: block; margin: 0 auto; pointer-events: none; }
+                                    object-fit: cover; border-radius: 8px; display: block; margin: 0 auto; pointer-events: none; -webkit-user-drag: none; }
+.featured.dragging { cursor: grabbing; }
 .featured .title { margin-top: 8px; font-size: 1.1rem; font-weight: 600; }
 .featured[data-hint]:not([data-hint=""])::after { content: attr(data-hint); position: absolute; top: 20px; left: 50%;
   transform: translateX(-50%); padding: 6px 14px; border-radius: 20px; background: var(--accent); color: #fff; font-weight: 600; }

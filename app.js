@@ -580,9 +580,13 @@ const swipe = (dx, dy) => Math.max(Math.abs(dx), Math.abs(dy)) < 80 ? null
 const swipeLabel = { better: 'Better', played: 'Played it', worse: 'Worse', want: 'Want to play', havent: "Haven't played" };
 view.addEventListener('pointerdown', e => {
   const el = e.target.closest('.featured');
-  if (!el) return;
+  if (!el || e.button !== 0) return;
+  e.preventDefault(); // no text selection or image drag on desktop
+  getSelection()?.removeAllRanges();
   drag = { el, x: e.clientX, y: e.clientY };
   el.setPointerCapture(e.pointerId);
+  el.classList.add('dragging');
+  el.style.transition = 'none';
 });
 view.addEventListener('pointermove', e => {
   if (!drag) return;
@@ -595,7 +599,12 @@ const endDrag = e => {
   const { el, x, y } = drag, a = e.type === 'pointerup' && swipe(e.clientX - x, e.clientY - y);
   drag = null;
   el.dataset.hint = '';
-  if (!a) { el.style.transform = ''; return; }
+  el.classList.remove('dragging');
+  if (!a) { // not far enough: spring back
+    el.style.transition = 'transform .2s';
+    el.style.transform = '';
+    return;
+  }
   el.style.transition = 'transform .15s, opacity .15s';
   el.style.transform += ' scale(.9)';
   el.style.opacity = 0;
