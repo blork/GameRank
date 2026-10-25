@@ -320,11 +320,11 @@ async function rank() {
       </div>
       ${same ? `<p class="same">A version of <b>${esc(game(same).name)}</b>, which is in your list.
         <button data-act="merge-new" data-id="${same}">Count as the same game</button></p>` : ''}
-      ${ref ? `<p class="ask">Better or worse than</p>
+      ${ref ? `<p class="ask">Rank this above or below</p>
         <div class="vs">${cover(ref, 't_thumb', true)}<span>${label(ref)}</span></div>`
         : '<p class="ask">Have you played this?</p>'}
       <div class="answers">${ref
-        ? '<button data-act="worse">← Worse</button><button data-act="better" class="primary">Better →</button>'
+        ? '<button data-act="worse">← Below</button><button data-act="better" class="primary">Above →</button>'
         : '<button data-act="played" class="primary">Played it →</button>'}</div>
       ${c.isNew ? `<div class="answers secondary"><button data-act="havent">↓ Haven't played</button>
         <button data-act="want">↑ Want to play</button></div>` : ''}
@@ -640,7 +640,7 @@ function raiseBack(p, animate = false) {
 }
 const swipe = (dx, dy) => Math.max(Math.abs(dx), Math.abs(dy)) < 80 ? null
   : Math.abs(dx) > Math.abs(dy) ? onScreen(dx > 0 ? ['better', 'played'] : ['worse']) : onScreen([dy < 0 ? 'want' : 'havent']);
-const swipeLabel = { better: 'Better', played: 'Played it', worse: 'Worse', want: 'Want to play', havent: "Haven't played" };
+const swipeLabel = { better: 'Above', played: 'Played it', worse: 'Below', want: 'Want to play', havent: "Haven't played" };
 view.addEventListener('pointerdown', e => {
   const el = e.target.closest('.featured');
   if (!el || e.button !== 0) return;
